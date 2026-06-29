@@ -14,7 +14,7 @@ scipy>=1.13.0             # KS test, Chi-squared (poison_detection.py)
 
 # ── Supply-chain audit (DevSecOps) ───────────────────────────────────────────
 pip-audit>=2.7.0
-nbdefense>=0.0.7          # Jupyter notebook secrets/PII/CVE scanner (NB Defense)
+# nbdefense abandonado (não suporta Python >=3.11) — substituído por grep-based scan no CI
 
 # ── Model scanning (Estágio 02) ───────────────────────────────────────────────
 modelscan>=0.8.0          # ProtectAI — backdoor/malicious code detection

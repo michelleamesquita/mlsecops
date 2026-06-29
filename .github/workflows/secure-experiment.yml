@@ -66,17 +66,32 @@ jobs:
         run: pip install -r requirements.txt
 
       # ── NB Defense — segurança em notebooks Jupyter ───────────────────────
-      # Detecta: secrets, PII, CVEs em dependências, células perigosas
+      # nbdefense não suporta Python ≥3.11 (abandonado).
+      # Alternativa: trufflehog para secrets + pip-audit para CVEs em deps de notebooks.
       # OWASP MLSVS V7 · Stage 2 do pipeline AISP
-      - name: Install nbdefense
-        run: pip install nbdefense
-
-      - name: NB Defense scan (notebooks)
-        if: hashFiles('**/*.ipynb') != ''
+      - name: Notebook security scan (secrets + hardcoded credentials)
         run: |
           mkdir -p results
-          nbdefense scan . --output-file results/nbdefense_report.json || true
-          echo "::notice::NB Defense report: results/nbdefense_report.json"
+          # Busca padrões de secrets hardcoded em notebooks
+          if ls **/*.ipynb 2>/dev/null | head -1 | grep -q ipynb; then
+            echo "Scanning notebooks for hardcoded secrets..."
+            grep -rn \
+              -e "password\s*=" \
+              -e "api_key\s*=" \
+              -e "secret\s*=" \
+              -e "token\s*=" \
+              --include="*.ipynb" . \
+              > results/notebook_secrets_scan.txt 2>/dev/null || true
+            COUNT=$(wc -l < results/notebook_secrets_scan.txt)
+            if [ "$COUNT" -gt "0" ]; then
+              echo "::warning::$COUNT linhas suspeitas encontradas em notebooks. Revise results/notebook_secrets_scan.txt"
+            else
+              echo "::notice::Notebook scan: nenhum padrão suspeito encontrado."
+            fi
+          else
+            echo "Nenhum notebook .ipynb encontrado — scan ignorado."
+            echo '{"notebooks_found": 0, "suspicious_lines": 0}' > results/notebook_secrets_scan.txt
+          fi
         continue-on-error: true
 
       # ── Treino reproduzível (seed fixo, MLflow tracking) ──────────────────
