@@ -108,8 +108,10 @@ jobs:
 
       # ── 1. FGSM robustness (BoundaryAttack black-box) ─────────────────────
       # MITRE ATLAS AML.T0043 · AML.T0015
-      # n-samples=50: BoundaryAttack é iterativo — reduzido para viabilidade em CI
+      # continue-on-error: true — falha não para o pipeline; o passo de
+      # sanitização a seguir detecta o resultado e aplica defesa automaticamente.
       - name: FGSM robustness (ε=0.1, min-acc=0.75)
+        continue-on-error: true
         run: |
           python scripts/adversarial_eval.py \
             --data      "$DATA_CSV" \
@@ -121,8 +123,25 @@ jobs:
             --n-samples 50 \
             --min-accuracy 0.75
 
+      # ── 1b. Input Sanitization — FGSM ────────────────────────────────────
+      # Lê results/adversarial_fgsm.json: se o gate falhou, aplica
+      # FeatureSqueezing + GaussianAugmentation e verifica recuperação.
+      # Se proteção já é suficiente, encerra sem ação.
+      # MITRE ATLAS AML.T0015 Mitigação · OWASP MLSVS V8
+      - name: Input sanitization defense (FGSM)
+        run: |
+          python scripts/input_sanitization.py \
+            --data       "$DATA_CSV" \
+            --target     "$TARGET_COLUMN" \
+            --model      "$MODEL_DIR/rf_model.pkl" \
+            --meta       "$MODEL_DIR/feature_names.json" \
+            --adv-report results/adversarial_fgsm.json \
+            --n-samples  50 \
+            --output     results/sanitization_fgsm.json
+
       # ── 2. PGD robustness (BoundaryAttack — mais iterações) ───────────────
       - name: PGD robustness (ε=0.05, steps=100, min-acc=0.70)
+        continue-on-error: true
         run: |
           python scripts/adversarial_eval.py \
             --data      "$DATA_CSV" \
@@ -134,6 +153,18 @@ jobs:
             --steps     100 \
             --n-samples 50 \
             --min-accuracy 0.70
+
+      # ── 2b. Input Sanitization — PGD ─────────────────────────────────────
+      - name: Input sanitization defense (PGD)
+        run: |
+          python scripts/input_sanitization.py \
+            --data       "$DATA_CSV" \
+            --target     "$TARGET_COLUMN" \
+            --model      "$MODEL_DIR/rf_model.pkl" \
+            --meta       "$MODEL_DIR/feature_names.json" \
+            --adv-report results/adversarial_pgd.json \
+            --n-samples  50 \
+            --output     results/sanitization_pgd.json
 
       # ── 3. Membership Inference (privacidade) ─────────────────────────────
       # MITRE ATLAS AML.T0056
