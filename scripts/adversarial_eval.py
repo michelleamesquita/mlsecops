@@ -190,47 +190,37 @@ def build_image_estimator(model, num_classes: int, input_shape: tuple[int, ...])
 
 def build_tabular_attack(attack_name: str, art_clf, epsilon: float, steps: int):
     """
-    Ataques para dados tabulares / sklearn (sem gradientes disponíveis).
-    Hierarquia:
-      fgsm: SquareAttack → DecisionTreeAttack → BoundaryAttack
-      pgd:  DecisionTreeAttack → SquareAttack → BoundaryAttack
+    Ataques para dados tabulares / sklearn.
+    SquareAttack requer NeuralNetworkMixin — não compatível com SklearnClassifier.
+    Ataques válidos para sklearn:
+      DecisionTreeAttack — explora estrutura interna de RF/árvores (melhor para RF)
+      BoundaryAttack     — decision-based puro, funciona com qualquer black-box
     """
-    DecisionTreeAttack = SquareAttack = BoundaryAttack = None
+    DecisionTreeAttack = None
+    BoundaryAttack = None
     try:
         from art.attacks.evasion import DecisionTreeAttack
     except Exception as exc:
         log.warning(f"  DecisionTreeAttack não disponível: {exc}")
     try:
-        from art.attacks.evasion import SquareAttack
-    except Exception as exc:
-        log.warning(f"  SquareAttack não disponível: {exc}")
-    try:
         from art.attacks.evasion import BoundaryAttack
     except Exception as exc:
         log.warning(f"  BoundaryAttack não disponível: {exc}")
 
-    if all(a is None for a in [DecisionTreeAttack, SquareAttack, BoundaryAttack]):
-        log.error("Nenhum ataque tabular disponível no ART.")
+    if DecisionTreeAttack is None and BoundaryAttack is None:
+        log.error("Nenhum ataque sklearn-compatível disponível no ART.")
         sys.exit(1)
 
-    if attack_name == "fgsm":
-        if SquareAttack:
-            log.info(f"  SquareAttack (FGSM proxy, ε={epsilon}): running…")
-            return SquareAttack(art_clf, eps=epsilon, max_iter=100, nb_restarts=1, verbose=False)
-        if DecisionTreeAttack:
-            log.info("  DecisionTreeAttack (fallback FGSM): running…")
-            return DecisionTreeAttack(art_clf, verbose=False)
-        log.info("  BoundaryAttack (fallback 2 FGSM): running…")
-        return BoundaryAttack(art_clf, targeted=False, max_iter=100)
-    else:  # pgd
-        if DecisionTreeAttack:
-            log.info("  DecisionTreeAttack (PGD proxy — tree-structure aware): running…")
-            return DecisionTreeAttack(art_clf, verbose=False)
-        if SquareAttack:
-            log.info(f"  SquareAttack (fallback PGD, ε={epsilon}): running…")
-            return SquareAttack(art_clf, eps=epsilon, max_iter=steps, nb_restarts=3, verbose=False)
-        log.info("  BoundaryAttack (fallback 2 PGD): running…")
-        return BoundaryAttack(art_clf, targeted=False, max_iter=steps)
+    # Para tabular sklearn: ambos os ataques (fgsm/pgd) usam a mesma hierarquia.
+    # DecisionTreeAttack é mais preciso para RF; BoundaryAttack é o fallback universal.
+    if DecisionTreeAttack is not None:
+        label = "FGSM proxy" if attack_name == "fgsm" else "PGD proxy"
+        log.info(f"  DecisionTreeAttack ({label} — tree-structure aware): running…")
+        return DecisionTreeAttack(art_clf, verbose=False)
+    else:
+        max_iter = 100 if attack_name == "fgsm" else steps
+        log.info(f"  BoundaryAttack (fallback, max_iter={max_iter}): running…")
+        return BoundaryAttack(art_clf, targeted=False, max_iter=max_iter)
 
 
 def build_image_attack(attack_name: str, art_clf, epsilon: float, steps: int):
