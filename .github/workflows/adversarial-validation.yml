@@ -106,30 +106,33 @@ jobs:
               --update
           fi
 
-      # ── 1. FGSM robustness (ZooAttack black-box) ──────────────────────────
+      # ── 1. FGSM robustness (BoundaryAttack black-box) ─────────────────────
       # MITRE ATLAS AML.T0043 · AML.T0015
+      # n-samples=50: BoundaryAttack é iterativo — reduzido para viabilidade em CI
       - name: FGSM robustness (ε=0.1, min-acc=0.75)
         run: |
           python scripts/adversarial_eval.py \
-            --data    "$DATA_CSV" \
-            --target  "$TARGET_COLUMN" \
-            --model   "$MODEL_DIR/rf_model.pkl" \
-            --meta    "$MODEL_DIR/feature_names.json" \
-            --attack  fgsm \
-            --epsilon 0.1 \
+            --data      "$DATA_CSV" \
+            --target    "$TARGET_COLUMN" \
+            --model     "$MODEL_DIR/rf_model.pkl" \
+            --meta      "$MODEL_DIR/feature_names.json" \
+            --attack    fgsm \
+            --epsilon   0.1 \
+            --n-samples 50 \
             --min-accuracy 0.75
 
-      # ── 2. PGD robustness (HopSkipJump — mais forte) ──────────────────────
-      - name: PGD robustness (ε=0.05, steps=40, min-acc=0.70)
+      # ── 2. PGD robustness (BoundaryAttack — mais iterações) ───────────────
+      - name: PGD robustness (ε=0.05, steps=100, min-acc=0.70)
         run: |
           python scripts/adversarial_eval.py \
-            --data    "$DATA_CSV" \
-            --target  "$TARGET_COLUMN" \
-            --model   "$MODEL_DIR/rf_model.pkl" \
-            --meta    "$MODEL_DIR/feature_names.json" \
-            --attack  pgd \
-            --epsilon 0.05 \
-            --steps   40 \
+            --data      "$DATA_CSV" \
+            --target    "$TARGET_COLUMN" \
+            --model     "$MODEL_DIR/rf_model.pkl" \
+            --meta      "$MODEL_DIR/feature_names.json" \
+            --attack    pgd \
+            --epsilon   0.05 \
+            --steps     100 \
+            --n-samples 50 \
             --min-accuracy 0.70
 
       # ── 3. Membership Inference (privacidade) ─────────────────────────────

@@ -190,37 +190,25 @@ def build_image_estimator(model, num_classes: int, input_shape: tuple[int, ...])
 
 def build_tabular_attack(attack_name: str, art_clf, epsilon: float, steps: int):
     """
-    Ataques para dados tabulares / sklearn.
-    SquareAttack requer NeuralNetworkMixin — não compatível com SklearnClassifier.
-    Ataques válidos para sklearn:
-      DecisionTreeAttack — explora estrutura interna de RF/árvores (melhor para RF)
-      BoundaryAttack     — decision-based puro, funciona com qualquer black-box
+    Ataques para sklearn RandomForestClassifier via SklearnClassifier.
+
+    Compatibilidade ART para RF:
+      DecisionTreeAttack → requer ScikitlearnDecisionTreeClassifier (DT simples, não RF)
+      SquareAttack       → requer NeuralNetworkMixin (PyTorch/TF apenas)
+      BoundaryAttack     → ✅ decision-based black-box puro (só precisa de predict())
+
+    BoundaryAttack é o único ataque ART universalmente compatível com RF.
     """
-    DecisionTreeAttack = None
-    BoundaryAttack = None
-    try:
-        from art.attacks.evasion import DecisionTreeAttack
-    except Exception as exc:
-        log.warning(f"  DecisionTreeAttack não disponível: {exc}")
     try:
         from art.attacks.evasion import BoundaryAttack
     except Exception as exc:
-        log.warning(f"  BoundaryAttack não disponível: {exc}")
-
-    if DecisionTreeAttack is None and BoundaryAttack is None:
-        log.error("Nenhum ataque sklearn-compatível disponível no ART.")
+        log.error(f"BoundaryAttack não disponível: {exc}")
         sys.exit(1)
 
-    # Para tabular sklearn: ambos os ataques (fgsm/pgd) usam a mesma hierarquia.
-    # DecisionTreeAttack é mais preciso para RF; BoundaryAttack é o fallback universal.
-    if DecisionTreeAttack is not None:
-        label = "FGSM proxy" if attack_name == "fgsm" else "PGD proxy"
-        log.info(f"  DecisionTreeAttack ({label} — tree-structure aware): running…")
-        return DecisionTreeAttack(art_clf, verbose=False)
-    else:
-        max_iter = 100 if attack_name == "fgsm" else steps
-        log.info(f"  BoundaryAttack (fallback, max_iter={max_iter}): running…")
-        return BoundaryAttack(art_clf, targeted=False, max_iter=max_iter)
+    max_iter = 50 if attack_name == "fgsm" else max(steps, 100)
+    log.info(f"  BoundaryAttack (black-box RF, {attack_name.upper()} proxy, "
+             f"max_iter={max_iter}): running…")
+    return BoundaryAttack(art_clf, targeted=False, max_iter=max_iter)
 
 
 def build_image_attack(attack_name: str, art_clf, epsilon: float, steps: int):
