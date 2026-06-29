@@ -161,14 +161,19 @@ jobs:
             --output results/lineage_manifest.json
           echo "::notice::Lineage manifest: results/lineage_manifest.json"
 
-      # ── CycloneDX ML SBOM ─────────────────────────────────────────────────
-      - name: Generate ML SBOM (CycloneDX)
+      # ── CycloneDX ML BOM (Software Bill of Materials + Model Card) ──────────
+      # Gera SBOM completo: dependências Python + ML model card (CycloneDX 1.6)
+      # Inclui: algoritmo, features, métricas, dataset provenance, ética
+      # ISO/IEC 42001 · OWASP CycloneDX ML BOM
+      - name: Generate ML BOM (CycloneDX 1.6 + model card)
         run: |
-          pip install cyclonedx-bom
           mkdir -p results
-          # cyclonedx-bom v4+: --outfile removido; output vai para stdout
-          cyclonedx-py environment --output-format JSON > results/sbom.cdx.json
-          echo "::notice::SBOM gerado em results/sbom.cdx.json"
+          python scripts/generate_mlbom.py \
+            --model   "$MODEL_OUTPUT_DIR/rf_model.pkl" \
+            --meta    "$MODEL_OUTPUT_DIR/feature_names.json" \
+            --metrics "results/train_metrics_latest.json" \
+            --output  results/sbom_ml.cdx.json
+          echo "::notice::ML BOM gerado em results/sbom_ml.cdx.json (spec 1.6 + model card)"
 
       # ── Upload artefatos ──────────────────────────────────────────────────
       - name: Upload signed model

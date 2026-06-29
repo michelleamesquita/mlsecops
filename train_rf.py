@@ -350,6 +350,26 @@ def train(data_path: Path = DATA_PATH, sample: int | None = None,
         with open("results/train_metrics.md", "w") as f:
             f.write(md)
 
+        # JSON de métricas — lido pelo generate_mlbom.py para o model card
+        metrics_json = {
+            "roc_auc":           round(roc, 4),
+            "f1_weighted":       round(f1, 4),
+            "accuracy":          round(acc, 4),
+            "precision_weighted": round(prec, 4),
+            "recall_weighted":   round(rec, 4),
+            "oob_score":         round(clf.oob_score_, 4),
+            "n_estimators":      trees_added,
+            "train_samples":     len(X_train),
+            "test_samples":      len(X_test),
+            "run_id":            run_id,
+        }
+        if cv_roc_mean:
+            metrics_json["cv_roc_auc_mean"] = round(cv_roc_mean, 4)
+            metrics_json["cv_roc_auc_std"]  = round(cv_roc_std, 4)
+        with open("results/train_metrics_latest.json", "w") as f:
+            json.dump(metrics_json, f, indent=2)
+        log.info("  Métricas JSON: results/train_metrics_latest.json")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MLSecOps RF Findings Classifier — Treino")
