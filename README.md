@@ -18,7 +18,7 @@ mlsecops/
 ├── requirements.txt                        # Dependências Python
 ├── policy.yml                              # Policy machine-readable (lida pelo compliance gate)
 ├── POLICY.md                               # Policy humana (OWASP MLSVS · MITRE ATLAS)
-├── promptfoo.yaml                          # Red-team config LLM
+├── promptfoo.yaml                          # Red-team config LLM (threshold: 0.95)
 │
 ├── scripts/                                # Controles MLSecOps genéricos
 │   │
@@ -32,33 +32,43 @@ mlsecops/
 │   │   ── Estágio 02 · Model Training ────────────────────────────────
 │   ├── model_scan.py                       # ModelScan (ProtectAI) + pickle audit
 │   ├── lineage.py                          # Lineage manifest: provenance chain completa
+│   ├── generate_mlbom.py                   # CycloneDX ML BOM + Model Card (1.6 spec)
+│   ├── fetch_owasp_aibom.py                # OWASP AIBOM Generator (HuggingFace models)
 │   │
 │   │   ── Estágio 03 · Inference ──────────────────────────────────────
 │   ├── model_behavioral_baseline.py        # Fingerprint comportamental do modelo
-│   ├── adversarial_eval.py                 # FGSM/PGD via IBM ART
+│   ├── adversarial_eval.py                 # FGSM/PGD via IBM ART (tabular + images)
+│   ├── input_sanitization.py               # FeatureSqueezing + GaussianAug (defesa automática)
+│   ├── binary_input_detector.py            # BinaryInputDetector: porteiro limpo/adversarial
 │   ├── membership_inference.py             # Membership inference via IBM ART
 │   ├── model_extraction_test.py            # Knockoff extraction test (AML.T0044)
 │   │
 │   │   ── Governance ────────────────────────────────────────────────
 │   ├── compliance_check.py                 # InSpec para MLSecOps (lê policy.yml)
-│   └── inference_monitor.py                # Monitoramento de inferência em produção
+│   ├── generate_ci_data.py                 # Dataset sintético para CI/CD (fallback)
+│   └── lineage.py                          # build + verify: SLSA Level 2
 │
 ├── .github/workflows/
 │   ├── main-pipeline.yml                   # ★ Orquestrador (chama os 3 estágios)
 │   ├── data-validation.yml                 # Estágio 01 · Data
 │   ├── secure-experiment.yml               # Estágio 02 · Model Training
-│   ├── adversarial-validation.yml          # Estágio 03 · Inference
-│   └── compliance-gate.yml                 # Gate final · OWASP MLSVS V10
+│   └── adversarial-validation.yml          # Estágio 03 · Inference (jobs paralelos)
 │
 ├── model/                                  # Artefatos (runtime)
 │   ├── rf_model.pkl
 │   ├── feature_names.json
 │   ├── behavioral_baseline.json            # Fingerprint do modelo aprovado
+│   ├── binary_detector.pkl                 # Detector de inputs adversariais
 │   └── checksums.sha256
 │
-├── results/                                # Relatórios de cada gate (runtime)
-│   └── lineage_manifest.json               # Provenance chain completa
-└── data/                                   # Splits e checksums (runtime)
+└── results/                                # Relatórios de cada gate (runtime)
+    ├── lineage_manifest.json
+    ├── adversarial_fgsm.json
+    ├── adversarial_pgd.json
+    ├── sanitization_fgsm.json
+    ├── sanitization_pgd.json
+    ├── binary_detector_report.json
+    └── compliance_report.json
 ```
 
 ---
@@ -84,9 +94,9 @@ push → main
 ┌──────────────────────────▼──────────────────────────────────────────┐
 │  02 · secure-experiment.yml                                         │
 │                                                                     │
-│  pip-audit → NB Defense → train_rf (seed + KFold + early stop)      │
+│  pip-audit → NB scan → train_rf (seed + KFold + early stop)         │
 │  → model_scan → lineage.py (build manifest)                         │
-│  → Sigstore SLSA → CycloneDX SBOM                                   │
+│  → Sigstore SLSA → CycloneDX ML BOM + OWASP AIBOM                   │
 │                                                                     │
 │  🔒 Supply-Chain Gate                                               │
 └──────────────────────────┬──────────────────────────────────────────┘
@@ -94,21 +104,15 @@ push → main
 ┌──────────────────────────▼──────────────────────────────────────────┐
 │  03 · adversarial-validation.yml                                    │
 │                                                                     │
-│  model_scan → lineage.py (verify) → model_behavioral_baseline       │
-│  → adversarial_eval (FGSM + PGD)                                    │
-│  → membership_inference → model_extraction_test                     │
-│  → poison_detection → promptfoo → Garak                            │
+│  setup ──┬── fgsm-eval ──┐                                          │
+│          │  (FGSM +      │                                          │
+│          │   sanitiz. +  ├──▶ post-eval                             │
+│          │   detector)   │    (membership · extraction ·            │
+│          └── pgd-eval  ──┘     poison · promptfoo · garak ·        │
+│             (PGD +             compliance gate)                     │
+│              sanitiz.)                                              │
 │                                                                     │
-│  🔒 Adversarial Gate                                                │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           │ needs: adversarial-validation
-┌──────────────────────────▼──────────────────────────────────────────┐
-│  04 · compliance-gate.yml                                           │
-│                                                                     │
-│  compliance_check.py lê results/*.json vs policy.yml               │
-│  OWASP MLSVS V10 — nenhum modelo promovido sem passar aqui         │
-│                                                                     │
-│  🔒 Compliance Gate                                                 │
+│  🔒 Adversarial Gate  [FGSM e PGD rodam em paralelo]               │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -126,7 +130,7 @@ Os workflows individuais continuam respondendo aos seus próprios triggers (push
 | AML.T0018 | Backdoor ML Model | Data + Inference | `model_scan` + `model_behavioral_baseline` |
 | AML.T0010 | Supply Chain Compromise | Training | `integrity_check` (SLSA) + `lineage.py` + `pip-audit` + `model_scan` |
 | AML.T0043 | Craft Adversarial Examples | Inference | `adversarial_eval` (FGSM/PGD via IBM ART) |
-| AML.T0015 | Evade ML Model | Inference | `adversarial_eval` (min accuracy gate) |
+| AML.T0015 | Evade ML Model | Inference | `adversarial_eval` + `input_sanitization` + `binary_input_detector` |
 | AML.T0056 | Membership Inference | Inference | `membership_inference` (MI advantage ≤ 10%) |
 | AML.T0044 | Extract ML Model | Inference | `model_extraction_test` (knockoff fidelity ≤ 90%) |
 
@@ -143,7 +147,7 @@ Todos os scripts aceitam `--data`, `--target` e `--model` como parâmetros. Nenh
 | `integrity_check.py` | SHA256 em dados/modelos, manifesto SLSA. `--row-level` hasha CSV em chunks para detectar substituição parcial de linhas (*split-view poisoning*). | Arquivo adulterado, ausente ou chunk com hash diferente do baseline |
 | `ge_validate.py` | Schema, tipos, nulos, cardinalidade | Coluna faltando ou target com nulos |
 | `poison_detection.py` | KS · Chi² · JS Divergence · Isolation Forest · IQR · **Chaff Detection** (near-duplicates). `--chaff-threshold` define a taxa máxima tolerada. | JSD > 0.10 no target ou near-duplicate rate > threshold |
-| `label_noise_check.py` | Cleanlab OOF label noise | noise rate > 5% (calibrar) |
+| `label_noise_check.py` | Cleanlab OOF label noise. `--fail-on-noise` torna o gate bloqueante. | noise rate > 5% com `--fail-on-noise` |
 | `drift_report.py` | Evidently DataDriftPreset + PSI fallback | > 30% features drifted (alerta) |
 
 ### Estágio 02 · Model Training
@@ -152,6 +156,8 @@ Todos os scripts aceitam `--data`, `--target` e `--model` como parâmetros. Nenh
 |---|---|---|
 | `model_scan.py` | ModelScan (ProtectAI) + pickle audit + magic bytes + SHA256 | Globals perigosos ou hash mismatch |
 | `lineage.py build` | Constrói manifesto de provenance: SHA256 de dados + scripts + configs + modelo + métricas MLflow + resultados de segurança. Compatível com SLSA Level 2. | Sempre gera; verificação acontece no estágio seguinte |
+| `generate_mlbom.py` | CycloneDX 1.6 ML BOM: inventário de dependências + Model Card (algoritmo, features, métricas, considerações éticas). | Sempre gera `results/sbom_ml.cdx.json` |
+| `fetch_owasp_aibom.py` | Baixa AIBOM do OWASP AIBOM Generator para modelos HuggingFace. Só executa se `HF_MODEL_ID` estiver configurado. | Erro de API |
 
 ### Estágio 03 · Inference
 
@@ -159,7 +165,9 @@ Todos os scripts aceitam `--data`, `--target` e `--model` como parâmetros. Nenh
 |---|---|---|
 | `lineage.py verify` | Re-hasha artefatos e compara ao manifesto — detecta substituição de modelo entre treinamento e deploy. | Hash divergente (AML.T0010 artifact substitution) |
 | `model_behavioral_baseline.py` | Fingerprint de predições em set fixo; detecta drift comportamental | JSD > 0.05 ou > 5% predições mudaram |
-| `adversarial_eval.py` | FGSM (ZooAttack) e PGD (HopSkipJump) via IBM ART | acc < 0.75 (FGSM) ou < 0.70 (PGD) |
+| `adversarial_eval.py` | FGSM e PGD via IBM ART. Modo `tabular`: BoundaryAttack (único compatível com RF). Modo `images`: FGSM/PGD reais com gradiente (PyTorch). Salva `results/adversarial_{fgsm,pgd}.json`. | acc < 0.75 (FGSM) ou < 0.70 (PGD) |
+| `input_sanitization.py` | Lê `adversarial_*.json`. Se o gate falhou, aplica **FeatureSqueezing** + **GaussianAugmentation** + combinação e mede recuperação de acurácia. Defesa automática sem intervenção manual. | Mesmo com defesa, acc ainda abaixo do threshold |
+| `binary_input_detector.py` | Treina um classificador binário (Logistic Regression) para distinguir inputs limpos de adversariais **antes** de chegar ao RF. Encapsula com `art.defences.detector.evasion.BinaryInputDetector`. | detection rate < 0.70 ou false positive rate > 0.10 |
 | `membership_inference.py` | MembershipInferenceBlackBox — privacidade dos dados de treino | advantage > 10% |
 | `model_extraction_test.py` | Knockoff model via queries black-box (AML.T0044) | fidelidade > 90% (WARNING) |
 
@@ -168,7 +176,41 @@ Todos os scripts aceitam `--data`, `--target` e `--model` como parâmetros. Nenh
 | Script | O que faz |
 |---|---|
 | `compliance_check.py` | Lê `policy.yml` + `results/*.json`; reporta PASS/FAIL/WARN por controle |
-| `inference_monitor.py` | Batch: KS shift + Isolation Forest + confidence degradation em produção |
+| `generate_ci_data.py` | Gera dataset sintético com mesmo schema do real para uso em CI quando `all_findings_flat.csv` está git-ignorado |
+
+---
+
+## Defesas adversariais (IBM ART)
+
+O pipeline implementa defesa em **três camadas** sequenciais para ataques de evasão:
+
+```
+Input → [BinaryInputDetector] → adversarial? → BLOQUEADO
+                              → limpo?       → [InputSanitization] → RF principal
+                                                  FeatureSqueezing
+                                                  GaussianAugmentation
+```
+
+| Camada | Script | Quando ativa |
+|---|---|---|
+| **Detecção** | `binary_input_detector.py` | Toda inferência — detecta e bloqueia |
+| **Sanitização** | `input_sanitization.py` | Gate falhou — aplica defesa e re-avalia |
+| **Gate** | `adversarial_eval.py` | Sempre — mede acc adversarial |
+
+O `adversarial-validation.yml` roda FGSM e PGD **em paralelo** (jobs independentes no GitHub Actions), reduzindo ~50% do tempo do estágio 03.
+
+---
+
+## promptfoo (LLMs)
+
+O `promptfoo.yaml` define testes red-team para quando o pipeline evoluir para incluir componentes LLM. **Para ML clássico (Random Forest), o step é pulado automaticamente** — só executa se `OPENAI_API_KEY` ou `LLM_ENDPOINT` estiver configurado como secret no GitHub.
+
+Gates configurados:
+
+| Nível | Threshold | Testes cobertos |
+|---|---|---|
+| Global (`defaultTest`) | score ≥ 0.90 | Todos os testes |
+| `llm-rubric` individual | threshold: 0.95 | Goal hijacking, jailbreak, data leakage |
 
 ---
 
@@ -178,6 +220,7 @@ Todos os scripts aceitam `--data`, `--target` e `--model` como parâmetros. Nenh
 # 1. Instalar dependências
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+pip install adversarial-robustness-toolbox
 
 # 2. Gerar checksums baseline (arquivo inteiro + row-level por chunks)
 python scripts/integrity_check.py \
@@ -209,10 +252,27 @@ python scripts/model_behavioral_baseline.py \
 # 7. Escanear modelo
 python scripts/model_scan.py --model model/rf_model.pkl
 
-# 8. Compliance gate
+# 8. Avaliação adversarial + defesas
+python scripts/adversarial_eval.py \
+    --data all_findings_flat.csv --target is_risky \
+    --model model/rf_model.pkl --meta model/feature_names.json \
+    --attack fgsm --epsilon 0.1 --n-samples 50 --min-accuracy 0.75
+
+python scripts/input_sanitization.py \
+    --data all_findings_flat.csv --target is_risky \
+    --model model/rf_model.pkl --meta model/feature_names.json \
+    --adv-report results/adversarial_fgsm.json \
+    --output results/sanitization_fgsm.json
+
+python scripts/binary_input_detector.py \
+    --data all_findings_flat.csv --target is_risky \
+    --model model/rf_model.pkl --meta model/feature_names.json \
+    --n-samples 50 --output-dir results/
+
+# 9. Compliance gate
 python scripts/compliance_check.py --policy policy.yml --results results/
 
-# 9. Ver métricas no MLflow UI
+# 10. Ver métricas no MLflow UI
 mlflow ui --backend-store-uri sqlite:///mlflow.db
 # Acesse http://127.0.0.1:5000
 ```
@@ -269,5 +329,7 @@ Os thresholds dos gates são definidos em [`policy.yml`](policy.yml) e documenta
 - [Evidently AI](https://github.com/evidentlyai/evidently)
 - [Sigstore / cosign](https://docs.sigstore.dev)
 - [CycloneDX ML SBOM](https://cyclonedx.org/capabilities/mlbom/)
+- [OWASP AIBOM Generator](https://genai.owasp.org/resource/owasp-aibom-generator/)
 - [MLflow](https://mlflow.org)
+- [promptfoo](https://promptfoo.dev)
 - [Carlini et al., 2024 — Split-view poisoning](https://arxiv.org/abs/2312.04748)
