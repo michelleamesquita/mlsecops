@@ -3,6 +3,13 @@
 #
 # GENÉRICO: configure TARGET_COLUMN e MODEL_PATH para qualquer projeto ML.
 # Ref: OpenSSF MLSecOps Whitepaper 2025 · MITRE ATLAS AML.T0043 · AML.T0056
+#
+# Estrutura de jobs (paralelismo):
+#
+#   setup ──┬── fgsm-eval ──┐
+#           └── pgd-eval  ──┴── post-eval
+#
+# FGSM e PGD rodam em paralelo após o setup, economizando ~50% do tempo de CI.
 
 name: adversarial-validation
 
@@ -18,9 +25,10 @@ env:
   TARGET_COLUMN: "is_risky"
   MODEL_DIR: "model"
 
+# ── Job 1: Setup — treino, integridade, baseline ──────────────────────────────
 jobs:
-  adversarial-eval:
-    name: "Adversarial Gate"
+  setup:
+    name: "Setup & Train"
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,7 +59,6 @@ jobs:
               --output "$DATA_CSV" --rows 5000 --seed 42
           fi
 
-      # ── Treino rápido para CI (amostra) ───────────────────────────────────
       - name: Train model (CI sample)
         env:
           DATA_PATH: ${{ env.DATA_CSV }}
@@ -63,53 +70,81 @@ jobs:
             --experiment-name "adv-ci-${{ github.sha }}" \
             --sample 80000
 
-      # ── 0. Integridade do modelo antes dos ataques ─────────────────────────
       - name: Verify model integrity
         run: |
+          mkdir -p results/
           python scripts/model_scan.py \
             --model "$MODEL_DIR/rf_model.pkl" \
             --output-dir results/
 
-      # ── 0a. Verificar Lineage Manifest ────────────────────────────────────
-      # Confirma que o modelo que chega na fase adversarial é o mesmo que foi treinado.
-      # MITRE ATLAS AML.T0010 (artifact substitution)
       - name: Verify lineage manifest
         run: |
           if [ -f "results/lineage_manifest.json" ]; then
             python scripts/lineage.py verify results/lineage_manifest.json \
               --model "$MODEL_DIR/rf_model.pkl"
-            echo "::notice::Lineage verified — model artifact matches training manifest."
           else
-            echo "::warning::No lineage manifest found — skipping verification (seed with build step)."
+            echo "::warning::No lineage manifest found — skipping verification."
           fi
 
-      # ── 0b. Behavioral baseline (fingerprint do modelo) ──────────────────
-      # Salva baseline na primeira vez; verifica drift em re-treinamentos.
       # MITRE ATLAS AML.T0018 · AML.T0020
       - name: Model behavioral baseline check
         run: |
           if [ -f "$MODEL_DIR/behavioral_baseline.json" ]; then
             python scripts/model_behavioral_baseline.py \
-              --data    "$DATA_CSV" \
-              --target  "$TARGET_COLUMN" \
-              --model   "$MODEL_DIR/rf_model.pkl" \
-              --meta    "$MODEL_DIR/feature_names.json" \
+              --data     "$DATA_CSV" \
+              --target   "$TARGET_COLUMN" \
+              --model    "$MODEL_DIR/rf_model.pkl" \
+              --meta     "$MODEL_DIR/feature_names.json" \
               --baseline "$MODEL_DIR/behavioral_baseline.json" \
               --output-dir results/
           else
             echo "::notice::No baseline yet — creating initial behavioral baseline."
             python scripts/model_behavioral_baseline.py \
-              --data    "$DATA_CSV" \
-              --target  "$TARGET_COLUMN" \
-              --model   "$MODEL_DIR/rf_model.pkl" \
-              --meta    "$MODEL_DIR/feature_names.json" \
+              --data   "$DATA_CSV" \
+              --target "$TARGET_COLUMN" \
+              --model  "$MODEL_DIR/rf_model.pkl" \
+              --meta   "$MODEL_DIR/feature_names.json" \
               --update
           fi
 
-      # ── 1. FGSM robustness (BoundaryAttack black-box) ─────────────────────
+      # Compartilha modelo + dados com jobs paralelos via artifact
+      - name: Upload CI model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-model
+          path: |
+            ${{ env.MODEL_DIR }}/
+            ${{ env.DATA_CSV }}
+            results/
+          retention-days: 1
+
+# ── Job 2a: FGSM + Sanitization + BinaryDetector (paralelo) ─────────────────
+  fgsm-eval:
+    name: "FGSM + Sanitization + Detector"
+    runs-on: ubuntu-latest
+    needs: setup
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt && pip install adversarial-robustness-toolbox
+
+      - name: Download CI model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-model
+
+      # ── FGSM robustness ───────────────────────────────────────────────────
+      # continue-on-error: true — sanitização a seguir aplica defesa se falhar.
       # MITRE ATLAS AML.T0043 · AML.T0015
-      # continue-on-error: true — falha não para o pipeline; o passo de
-      # sanitização a seguir detecta o resultado e aplica defesa automaticamente.
       - name: FGSM robustness (ε=0.1, min-acc=0.75)
         continue-on-error: true
         run: |
@@ -123,10 +158,8 @@ jobs:
             --n-samples 50 \
             --min-accuracy 0.75
 
-      # ── 1b. Input Sanitization — FGSM ────────────────────────────────────
-      # Lê results/adversarial_fgsm.json: se o gate falhou, aplica
-      # FeatureSqueezing + GaussianAugmentation e verifica recuperação.
-      # Se proteção já é suficiente, encerra sem ação.
+      # ── Input Sanitization — FGSM ─────────────────────────────────────────
+      # Aplica FeatureSqueezing + GaussianAugmentation se o gate falhou.
       # MITRE ATLAS AML.T0015 Mitigação · OWASP MLSVS V8
       - name: Input sanitization defense (FGSM)
         run: |
@@ -139,7 +172,66 @@ jobs:
             --n-samples  50 \
             --output     results/sanitization_fgsm.json
 
-      # ── 2. PGD robustness (BoundaryAttack — mais iterações) ───────────────
+      # ── BinaryInputDetector ───────────────────────────────────────────────
+      # Treina um detector binário limpo/adversarial como porteiro de inferência.
+      # Gates: detection rate ≥ 0.70, false positive rate ≤ 0.10.
+      # MITRE ATLAS AML.T0015 Mitigação · OWASP MLSVS V8
+      - name: Binary input detector (train / verify)
+        run: |
+          if [ -f "$MODEL_DIR/binary_detector.pkl" ]; then
+            python scripts/binary_input_detector.py \
+              --data       "$DATA_CSV" \
+              --target     "$TARGET_COLUMN" \
+              --model      "$MODEL_DIR/rf_model.pkl" \
+              --meta       "$MODEL_DIR/feature_names.json" \
+              --detector   "$MODEL_DIR/binary_detector.pkl" \
+              --n-samples  50 \
+              --verify \
+              --output-dir results/
+          else
+            python scripts/binary_input_detector.py \
+              --data       "$DATA_CSV" \
+              --target     "$TARGET_COLUMN" \
+              --model      "$MODEL_DIR/rf_model.pkl" \
+              --meta       "$MODEL_DIR/feature_names.json" \
+              --n-samples  50 \
+              --output-dir results/
+          fi
+
+      - name: Upload FGSM results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-fgsm
+          path: results/
+          retention-days: 1
+
+# ── Job 2b: PGD + Sanitization (paralelo com FGSM) ───────────────────────────
+  pgd-eval:
+    name: "PGD + Sanitization"
+    runs-on: ubuntu-latest
+    needs: setup
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt && pip install adversarial-robustness-toolbox
+
+      - name: Download CI model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-model
+
+      # ── PGD robustness ────────────────────────────────────────────────────
+      # MITRE ATLAS AML.T0043 · AML.T0015
       - name: PGD robustness (ε=0.05, steps=100, min-acc=0.70)
         continue-on-error: true
         run: |
@@ -154,7 +246,7 @@ jobs:
             --n-samples 50 \
             --min-accuracy 0.70
 
-      # ── 2b. Input Sanitization — PGD ─────────────────────────────────────
+      # ── Input Sanitization — PGD ──────────────────────────────────────────
       - name: Input sanitization defense (PGD)
         run: |
           python scripts/input_sanitization.py \
@@ -165,6 +257,46 @@ jobs:
             --adv-report results/adversarial_pgd.json \
             --n-samples  50 \
             --output     results/sanitization_pgd.json
+
+      - name: Upload PGD results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-pgd
+          path: results/
+          retention-days: 1
+
+# ── Job 3: Post-eval — checks restantes + compliance gate ────────────────────
+  post-eval:
+    name: "Post-Attack Checks & Compliance"
+    runs-on: ubuntu-latest
+    needs: [fgsm-eval, pgd-eval]
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt && pip install adversarial-robustness-toolbox pyyaml
+
+      - name: Download CI model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-model
+
+      # Baixa e mescla resultados de FGSM e PGD em results/
+      - name: Download attack results (FGSM + PGD)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: results/
+          merge-multiple: true
 
       # ── 3. Membership Inference (privacidade) ─────────────────────────────
       # MITRE ATLAS AML.T0056
@@ -186,7 +318,6 @@ jobs:
             --output-dir results/
 
       # ── 4b. Model Extraction Test (AML.T0044) ─────────────────────────────
-      # Verifica se um adversário pode reconstruir o modelo via queries black-box.
       - name: Model extraction test (Knockoff, AML.T0044)
         run: |
           python scripts/model_extraction_test.py \
@@ -198,8 +329,7 @@ jobs:
             --max-fidelity  0.90
 
       # ── 5. promptfoo red-team (LLMs) ──────────────────────────────────────
-      # Só executa se houver um endpoint LLM configurado via secret.
-      # Para ML clássico (Random Forest), este step é pulado automaticamente.
+      # Só executa se houver endpoint LLM configurado via secret.
       - name: Install promptfoo
         if: env.LLM_ENDPOINT != '' || env.OPENAI_API_KEY != ''
         run: npm install -g promptfoo
@@ -218,9 +348,7 @@ jobs:
           LLM_ENDPOINT:   ${{ secrets.LLM_ENDPOINT || '' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
 
-      # ── 6. Garak — LLM vulnerability scanner (NVIDIA) ───────────────────
-      # OWASP LLM Top 10 · MITRE AML.T0056 · Prompt Injection · Jailbreak
-      # Aplicável quando o pipeline incluir endpoints LLM
+      # ── 6. Garak — LLM vulnerability scanner (NVIDIA) ────────────────────
       - name: Garak LLM security scan
         if: env.LLM_ENDPOINT != ''
         run: |
@@ -234,12 +362,9 @@ jobs:
           LLM_ENDPOINT: ${{ secrets.LLM_ENDPOINT || '' }}
         continue-on-error: true
 
-      # ── 7. Compliance Gate (Policy enforcement) ──────────────────────────
+      # ── 7. Compliance Gate ────────────────────────────────────────────────
       # Lê policy.yml e verifica todos os gates bloqueantes passaram.
       # OWASP MLSVS V10 — nenhum modelo promovido sem este gate.
-      - name: Install PyYAML
-        run: pip install pyyaml
-
       - name: Compliance Gate
         run: |
           python scripts/compliance_check.py \
@@ -247,8 +372,8 @@ jobs:
             --results results/ \
             --output results/compliance_report.json
 
-      # ── Upload todos os relatórios ────────────────────────────────────────
-      - name: Upload adversarial reports
+      # ── Upload relatórios finais ───────────────────────────────────────────
+      - name: Upload all adversarial reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
