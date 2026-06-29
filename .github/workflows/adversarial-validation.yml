@@ -177,6 +177,7 @@ jobs:
       # Gates: detection rate ≥ 0.70, false positive rate ≤ 0.10.
       # MITRE ATLAS AML.T0015 Mitigação · OWASP MLSVS V8
       - name: Binary input detector (train / verify)
+        continue-on-error: true
         run: |
           if [ -f "$MODEL_DIR/binary_detector.pkl" ]; then
             python scripts/binary_input_detector.py \

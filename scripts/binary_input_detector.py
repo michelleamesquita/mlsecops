@@ -122,18 +122,51 @@ def _generate_adversarial(clf, X_sub: np.ndarray) -> np.ndarray:
 # Treinar detector
 # ---------------------------------------------------------------------------
 
+def build_detector_features(X: np.ndarray, clf_main) -> np.ndarray:
+    """
+    Usa as probabilidades de predição do RF como features do detector.
+
+    BoundaryAttack empurra o exemplo para a fronteira de decisão, o que
+    se manifesta como queda de confiança (max_prob baixo, entropia alta).
+    Essas assinaturas são muito mais discriminativas que os valores brutos de X.
+
+    Features geradas (por amostra):
+      - proba de cada classe         (n_classes valores)
+      - max_proba                    (confiança da predição)
+      - entropia de Shannon          (incerteza)
+      - margem entre top-2 classes   (distância da fronteira)
+    """
+    probas = clf_main.predict_proba(X).astype(np.float32)
+    max_proba = probas.max(axis=1, keepdims=True)
+    # Entropia: -sum(p * log(p+ε))
+    entropy = -(probas * np.log(probas + 1e-9)).sum(axis=1, keepdims=True)
+    # Margem: diferença entre a maior e segunda maior probabilidade
+    sorted_p = np.sort(probas, axis=1)
+    margin = (sorted_p[:, -1] - sorted_p[:, -2]).reshape(-1, 1)
+
+    return np.hstack([probas, max_proba, entropy, margin])
+
+
 def train_detector(X_clean: np.ndarray, X_adv: np.ndarray,
                    clf_main) -> object:
     """
-    Treina um classificador binário (Logistic Regression) para detectar
-    inputs adversariais. Retorna o detector treinado (sklearn estimator).
+    Treina um classificador binário (Logistic Regression) sobre features de
+    probabilidade do RF para detectar inputs adversariais.
 
-    Label 0 = limpo, label 1 = adversarial
+    Label 0 = limpo, label 1 = adversarial.
+
+    Por que probabilidades e não X bruto:
+      BoundaryAttack produz perturbações mínimas em espaço de features —
+      estatisticamente quase idênticas ao dado original. Mas o RF responde
+      com confiança muito menor (próximo de 50/50), o que é detectável.
     """
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import cross_val_score
 
-    X_det = np.vstack([X_clean, X_adv]).astype(np.float32)
+    feats_clean = build_detector_features(X_clean, clf_main)
+    feats_adv   = build_detector_features(X_adv,   clf_main)
+
+    X_det = np.vstack([feats_clean, feats_adv])
     y_det = np.array([0] * len(X_clean) + [1] * len(X_adv))
 
     detector_clf = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
@@ -148,10 +181,10 @@ def train_detector(X_clean: np.ndarray, X_adv: np.ndarray,
 # Wrap com ART BinaryInputDetector
 # ---------------------------------------------------------------------------
 
-def wrap_with_art_detector(detector_clf, x_min: np.ndarray,
-                            x_max: np.ndarray):
+def wrap_with_art_detector(detector_clf):
     """
     Envolve o detector sklearn com art.defences.detector.evasion.BinaryInputDetector.
+    O detector opera sobre features de probabilidade (espaço [0,1]).
     Retorna o wrapper ART ou None se não disponível.
     """
     try:
@@ -162,9 +195,10 @@ def wrap_with_art_detector(detector_clf, x_min: np.ndarray,
                     "Usando detector sklearn direto.")
         return None
 
+    # clip_values=(0,1) porque as features são probabilidades do RF
     art_detector_clf = SklearnClassifier(
         model=detector_clf,
-        clip_values=(x_min, x_max),
+        clip_values=(0.0, 1.0),
     )
     return BinaryInputDetector(art_detector_clf)
 
@@ -233,19 +267,23 @@ def main() -> None:
         log.info(f"  Detector salvo: {detector_path}")
 
     # ── Tentar usar wrapper ART ──────────────────────────────────────────────
-    art_detector = wrap_with_art_detector(detector_clf, x_min, x_max)
+    art_detector = wrap_with_art_detector(detector_clf)
 
     # ── Avaliar desempenho do detector ───────────────────────────────────────
     log.info("\n=== Avaliação do BinaryInputDetector ===")
 
+    # Converter X bruto para features de probabilidade (mesmo espaço do treino)
+    feats_adv   = build_detector_features(X_adv, clf)
+    feats_clean = build_detector_features(X_sub, clf)
+
     if art_detector is not None:
-        # ART retorna (predictions, is_adversarial_bool_array)
-        _, is_adv_on_adv   = art_detector.detect(X_adv)
-        _, is_adv_on_clean = art_detector.detect(X_sub)
+        # ART BinaryInputDetector.detect() retorna ({}, is_adversarial_bool_array)
+        _, is_adv_on_adv   = art_detector.detect(feats_adv)
+        _, is_adv_on_clean = art_detector.detect(feats_clean)
     else:
-        # Fallback: sklearn direto
-        is_adv_on_adv   = detector_clf.predict(X_adv).astype(bool)
-        is_adv_on_clean = detector_clf.predict(X_sub).astype(bool)
+        # Fallback: sklearn direto sobre features de probabilidade
+        is_adv_on_adv   = detector_clf.predict(feats_adv).astype(bool)
+        is_adv_on_clean = detector_clf.predict(feats_clean).astype(bool)
 
     detection_rate = float(is_adv_on_adv.mean())    # True Positive Rate
     false_pos_rate = float(is_adv_on_clean.mean())  # False Positive Rate
