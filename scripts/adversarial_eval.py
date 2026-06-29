@@ -107,15 +107,19 @@ def main() -> None:
         log.error("Run: pip install adversarial-robustness-toolbox")
         sys.exit(1)
 
-    # Importa ataques com fallback — disponibilidade varia por versão do ART.
-    # ART 1.18+ removeu HopSkipJumpAttack; SquareAttack é o substituto recomendado.
-    ZooAttack = None
+    # Importa ataques adequados para dados tabulares / sklearn.
+    # ZooAttack tem shape mismatch em features multi-dimensionais — não usar.
+    # Hierarquia por qualidade para RF tabular:
+    #   1. DecisionTreeAttack — específico para RF/árvores, explora estrutura interna
+    #   2. SquareAttack       — score-based black-box, robusto para tabular
+    #   3. BoundaryAttack     — decision-based, mais lento mas universal
+    DecisionTreeAttack = None
     SquareAttack = None
     BoundaryAttack = None
     try:
-        from art.attacks.evasion import ZooAttack
+        from art.attacks.evasion import DecisionTreeAttack
     except (ImportError, Exception) as exc:
-        log.warning(f"  ZooAttack não disponível: {exc}")
+        log.warning(f"  DecisionTreeAttack não disponível: {exc}")
     try:
         from art.attacks.evasion import SquareAttack
     except (ImportError, Exception) as exc:
@@ -125,8 +129,8 @@ def main() -> None:
     except (ImportError, Exception) as exc:
         log.warning(f"  BoundaryAttack não disponível: {exc}")
 
-    if ZooAttack is None and SquareAttack is None and BoundaryAttack is None:
-        log.error("Nenhum ataque ART disponível. Verifique a instalação.")
+    if DecisionTreeAttack is None and SquareAttack is None and BoundaryAttack is None:
+        log.error("Nenhum ataque ART disponível para dados tabulares. Verifique a instalação.")
         sys.exit(1)
 
     for p in [args.model, args.data]:
@@ -160,15 +164,14 @@ def main() -> None:
 
     log.info(f"\n=== Attack: {args.attack.upper()} (ε={args.epsilon}) on {n} samples ===")
     if args.attack == "fgsm":
-        if ZooAttack is not None:
-            # batch_size=1 obrigatório para feature vectors tabulares (não imagens)
-            attack = ZooAttack(art_clf, confidence=0.0, targeted=False,
-                               learning_rate=args.epsilon, max_iter=50,
-                               batch_size=1, nb_parallel=1, use_resize=False)
-            log.info("  ZooAttack (FGSM proxy — score-based black-box): running…")
-        elif SquareAttack is not None:
-            attack = SquareAttack(art_clf, eps=args.epsilon, max_iter=100, verbose=False)
-            log.info("  SquareAttack (fallback para FGSM): running…")
+        # FGSM proxy: SquareAttack score-based com epsilon baixo (perturbação leve)
+        if SquareAttack is not None:
+            attack = SquareAttack(art_clf, eps=args.epsilon, max_iter=100,
+                                  nb_restarts=1, verbose=False)
+            log.info(f"  SquareAttack (FGSM proxy — score-based, ε={args.epsilon}): running…")
+        elif DecisionTreeAttack is not None:
+            attack = DecisionTreeAttack(art_clf, verbose=False)
+            log.info("  DecisionTreeAttack (fallback para FGSM): running…")
         elif BoundaryAttack is not None:
             attack = BoundaryAttack(art_clf, targeted=False, max_iter=100)
             log.info("  BoundaryAttack (fallback 2 para FGSM): running…")
@@ -176,14 +179,17 @@ def main() -> None:
             log.warning("  Nenhum ataque FGSM disponível — pulando.")
             attack = None
     else:  # pgd
-        # HopSkipJumpAttack removido no ART 1.18+; SquareAttack é o substituto recomendado
-        if SquareAttack is not None:
+        # PGD proxy: DecisionTreeAttack explora a estrutura do RF diretamente
+        if DecisionTreeAttack is not None:
+            attack = DecisionTreeAttack(art_clf, verbose=False)
+            log.info("  DecisionTreeAttack (PGD proxy — tree-structure aware): running…")
+        elif SquareAttack is not None:
             attack = SquareAttack(art_clf, eps=args.epsilon, max_iter=args.steps,
-                                  verbose=False)
-            log.info("  SquareAttack (PGD proxy — decision-based black-box): running…")
+                                  nb_restarts=3, verbose=False)
+            log.info(f"  SquareAttack (fallback para PGD, ε={args.epsilon}): running…")
         elif BoundaryAttack is not None:
             attack = BoundaryAttack(art_clf, targeted=False, max_iter=args.steps)
-            log.info("  BoundaryAttack (fallback para PGD): running…")
+            log.info("  BoundaryAttack (fallback 2 para PGD): running…")
         else:
             log.warning("  Nenhum ataque PGD disponível — pulando.")
             attack = None
