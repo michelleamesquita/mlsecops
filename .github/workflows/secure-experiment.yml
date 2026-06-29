@@ -165,9 +165,9 @@ jobs:
       - name: Generate ML SBOM (CycloneDX)
         run: |
           pip install cyclonedx-bom
-          cyclonedx-py environment \
-            --output-format json \
-            --outfile results/sbom.cdx.json
+          mkdir -p results
+          # cyclonedx-bom v4+: --outfile removido; output vai para stdout
+          cyclonedx-py environment --output-format JSON > results/sbom.cdx.json
           echo "::notice::SBOM gerado em results/sbom.cdx.json"
 
       # ── Upload artefatos ──────────────────────────────────────────────────
