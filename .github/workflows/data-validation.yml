@@ -1,0 +1,122 @@
+# Workflow 1 — Data Engineering & Validation (Estágio 01)
+# Policy gate: integridade ✓ · schema ✓ · label noise <5% · poison OK · drift OK
+#
+# GENÉRICO: configure TARGET_COLUMN e DATA_CSV para qualquer projeto ML.
+# Ref: OpenSSF MLSecOps Whitepaper 2025 · Sotiropoulos ch18 · MITRE ATLAS AML.T0020
+
+name: data-validation
+
+on:
+  workflow_call:
+  push:
+    paths:
+      - "**/*.csv"
+      - "data/**"
+      - "scripts/ge_validate.py"
+      - "scripts/label_noise_check.py"
+      - "scripts/drift_report.py"
+      - "scripts/poison_detection.py"
+      - "scripts/integrity_check.py"
+  pull_request:
+    branches: [main, staging]
+
+# ── Configuração do projeto (ajuste por dataset) ─────────────────────────────
+env:
+  PYTHON_VERSION: "3.11"
+  DATA_CSV: "all_findings_flat.csv"   # override para seu dataset
+  TARGET_COLUMN: "is_risky"           # override para sua coluna target
+
+jobs:
+  validate-data:
+    name: "Data Quality Gate"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install validation dependencies
+        run: |
+          pip install pandas pyarrow scipy scikit-learn \
+                      great-expectations cleanlab evidently
+
+      # ── 1. Integridade SHA256 — dados + configs ───────────────────────────
+      # MITRE ATLAS AML.T0010 · AML.T0020 · AML.T0024g (row-level: split-view poisoning)
+      - name: SHA256 Integrity Check (data)
+        run: |
+          python scripts/integrity_check.py \
+            --files "$DATA_CSV" data/ \
+            --checksums data/checksums.sha256 \
+            --row-level --chunk-size 10000 \
+            --output-dir results/
+
+      # ── 2. Schema + distribuição (Great Expectations) ─────────────────────
+      - name: Schema & distribution check (GE)
+        run: |
+          python scripts/ge_validate.py \
+            --data    "$DATA_CSV" \
+            --target  "$TARGET_COLUMN" \
+            --sample  100000
+
+      # ── 3. Detecção estatística de envenenamento ──────────────────────────
+      # KS test + Chi² + JS Divergence + Isolation Forest + IQR + Chaff Detection
+      - name: Statistical Poisoning Detection
+        run: |
+          python scripts/poison_detection.py \
+            --data   "$DATA_CSV" \
+            --target "$TARGET_COLUMN" \
+            --alpha  0.01 \
+            --contamination 0.05 \
+            --chaff-threshold 0.02 \
+            --output-dir results/ \
+            --fail-on-poison
+
+      # ── 4. Label noise (Cleanlab) ─────────────────────────────────────────
+      - name: Label noise check
+        run: |
+          python scripts/label_noise_check.py \
+            --data      "$DATA_CSV" \
+            --target    "$TARGET_COLUMN" \
+            --threshold 0.05 \
+            --sample    50000
+
+      # ── 5. Drift vs baseline (Evidently + PSI) ────────────────────────────
+      - name: Prepare baseline / current splits
+        run: |
+          python - <<'EOF'
+          import pandas as pd, pathlib, os
+          pathlib.Path("data").mkdir(exist_ok=True)
+          df = pd.read_csv(os.environ["DATA_CSV"], low_memory=False)
+          mid = len(df) // 2
+          df.iloc[:mid].to_parquet("data/baseline.parquet", index=False)
+          df.iloc[mid:].to_parquet("data/train.parquet",    index=False)
+          print(f"baseline={mid} rows | current={len(df)-mid} rows")
+          EOF
+
+      - name: Drift report
+        run: |
+          python scripts/drift_report.py \
+            --reference data/baseline.parquet \
+            --current   data/train.parquet \
+            --fail-on-drift
+
+      # ── 6. Proveniência (DVC) ─────────────────────────────────────────────
+      - name: DVC dry-run (provenance)
+        if: hashFiles('.dvc/config') != ''
+        run: pip install dvc && dvc pull && dvc repro --dry
+
+      - name: Upload validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-validation-reports
+          path: results/
+          retention-days: 14

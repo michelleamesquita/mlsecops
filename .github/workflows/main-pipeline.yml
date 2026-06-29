@@ -1,0 +1,45 @@
+# MLSecOps Main Pipeline
+# Orquestra os 3 estágios do ciclo de vida ML (Fig. 4-1 — Adversarial AI, Packt):
+#
+#   Data  ──►  Model Training  ──►  Inference (Adversarial)  ──►  Compliance Gate
+#
+# Cada estágio só começa após o anterior passar.
+# Os workflows individuais continuam disponíveis para triggers específicos.
+
+name: mlsecops-pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+
+  # ── Estágio 01 — Data Engineering & Validation ───────────────────────────
+  # Integridade · Schema · Poison Detection · Label Noise · Drift
+  data-validation:
+    name: "01 · Data Validation"
+    uses: ./.github/workflows/data-validation.yml
+
+  # ── Estágio 02 — Experimentação Segura ───────────────────────────────────
+  # SCA · NB Defense · Treino (seed fixo + KFold) · Model Scan · SLSA · SBOM
+  secure-experiment:
+    name: "02 · Secure Experiment"
+    needs: data-validation
+    uses: ./.github/workflows/secure-experiment.yml
+    secrets: inherit
+
+  # ── Estágio 03 — Validação & Ataques Adversariais ────────────────────────
+  # Behavioral Baseline · FGSM · PGD · Membership Inference · Model Extraction · Garak
+  adversarial-validation:
+    name: "03 · Adversarial Validation"
+    needs: secure-experiment
+    uses: ./.github/workflows/adversarial-validation.yml
+
+  # ── Compliance Gate — Policy Enforcement (OWASP MLSVS V10) ───────────────
+  # Lê todos os results/*.json e verifica policy.yml antes de promover o modelo
+  compliance-gate:
+    name: "Gate · Compliance (OWASP MLSVS)"
+    needs: adversarial-validation
+    uses: ./.github/workflows/compliance-gate.yml
+    secrets: inherit

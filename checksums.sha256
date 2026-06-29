@@ -1,0 +1,4 @@
+# MLSecOps integrity manifest — generated 2026-06-28T22:07:31.338520+00:00
+c523fe9f587a7f3d38988ccc184717336556f1e871de0a97fdfe846f644b9828  all_findings_flat.csv
+1fd5b0b1b3e811c0bd1d50767542ebd76ec0118390db461b273faebf2b4be288  model/feature_names.json
+7d6a02877269a65906409d49f50298635cefd6c2086b0b27dfe91051966f7d6d  model/rf_model.pkl

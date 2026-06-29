@@ -1,0 +1,203 @@
+# Workflow 3 — Validação & Ataques Adversariais (Estágio 03)
+# FGSM · PGD · Membership Inference · Model Integrity · promptfoo
+#
+# GENÉRICO: configure TARGET_COLUMN e MODEL_PATH para qualquer projeto ML.
+# Ref: OpenSSF MLSecOps Whitepaper 2025 · MITRE ATLAS AML.T0043 · AML.T0056
+
+name: adversarial-validation
+
+on:
+  workflow_call:
+  push:
+    branches: [main, staging]
+
+# ── Configuração do projeto ───────────────────────────────────────────────────
+env:
+  PYTHON_VERSION: "3.11"
+  DATA_CSV: "all_findings_flat.csv"
+  TARGET_COLUMN: "is_risky"
+  MODEL_DIR: "model"
+
+jobs:
+  adversarial-eval:
+    name: "Adversarial Gate"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install adversarial-robustness-toolbox modelscan
+
+      # ── Treino rápido para CI (amostra) ───────────────────────────────────
+      - name: Train model (CI sample)
+        env:
+          DATA_PATH: ${{ env.DATA_CSV }}
+          MODEL_OUTPUT_DIR: ${{ env.MODEL_DIR }}
+          MLFLOW_TRACKING_URI: "sqlite:///mlflow.db"
+        run: |
+          python train_rf.py \
+            --seed 42 \
+            --experiment-name "adv-ci-${{ github.sha }}" \
+            --sample 80000
+
+      # ── 0. Integridade do modelo antes dos ataques ─────────────────────────
+      - name: Verify model integrity
+        run: |
+          python scripts/model_scan.py \
+            --model "$MODEL_DIR/rf_model.pkl" \
+            --output-dir results/
+
+      # ── 0a. Verificar Lineage Manifest ────────────────────────────────────
+      # Confirma que o modelo que chega na fase adversarial é o mesmo que foi treinado.
+      # MITRE ATLAS AML.T0010 (artifact substitution)
+      - name: Verify lineage manifest
+        run: |
+          if [ -f "results/lineage_manifest.json" ]; then
+            python scripts/lineage.py verify results/lineage_manifest.json \
+              --model "$MODEL_DIR/rf_model.pkl"
+            echo "::notice::Lineage verified — model artifact matches training manifest."
+          else
+            echo "::warning::No lineage manifest found — skipping verification (seed with build step)."
+          fi
+
+      # ── 0b. Behavioral baseline (fingerprint do modelo) ──────────────────
+      # Salva baseline na primeira vez; verifica drift em re-treinamentos.
+      # MITRE ATLAS AML.T0018 · AML.T0020
+      - name: Model behavioral baseline check
+        run: |
+          if [ -f "$MODEL_DIR/behavioral_baseline.json" ]; then
+            python scripts/model_behavioral_baseline.py \
+              --data    "$DATA_CSV" \
+              --target  "$TARGET_COLUMN" \
+              --model   "$MODEL_DIR/rf_model.pkl" \
+              --meta    "$MODEL_DIR/feature_names.json" \
+              --baseline "$MODEL_DIR/behavioral_baseline.json" \
+              --output-dir results/
+          else
+            echo "::notice::No baseline yet — creating initial behavioral baseline."
+            python scripts/model_behavioral_baseline.py \
+              --data    "$DATA_CSV" \
+              --target  "$TARGET_COLUMN" \
+              --model   "$MODEL_DIR/rf_model.pkl" \
+              --meta    "$MODEL_DIR/feature_names.json" \
+              --update
+          fi
+
+      # ── 1. FGSM robustness (ZooAttack black-box) ──────────────────────────
+      # MITRE ATLAS AML.T0043 · AML.T0015
+      - name: FGSM robustness (ε=0.1, min-acc=0.75)
+        run: |
+          python scripts/adversarial_eval.py \
+            --data    "$DATA_CSV" \
+            --target  "$TARGET_COLUMN" \
+            --model   "$MODEL_DIR/rf_model.pkl" \
+            --meta    "$MODEL_DIR/feature_names.json" \
+            --attack  fgsm \
+            --epsilon 0.1 \
+            --min-accuracy 0.75
+
+      # ── 2. PGD robustness (HopSkipJump — mais forte) ──────────────────────
+      - name: PGD robustness (ε=0.05, steps=40, min-acc=0.70)
+        run: |
+          python scripts/adversarial_eval.py \
+            --data    "$DATA_CSV" \
+            --target  "$TARGET_COLUMN" \
+            --model   "$MODEL_DIR/rf_model.pkl" \
+            --meta    "$MODEL_DIR/feature_names.json" \
+            --attack  pgd \
+            --epsilon 0.05 \
+            --steps   40 \
+            --min-accuracy 0.70
+
+      # ── 3. Membership Inference (privacidade) ─────────────────────────────
+      # MITRE ATLAS AML.T0056
+      - name: Membership inference (max-advantage=0.10)
+        run: |
+          python scripts/membership_inference.py \
+            --data          "$DATA_CSV" \
+            --target        "$TARGET_COLUMN" \
+            --model         "$MODEL_DIR/rf_model.pkl" \
+            --meta          "$MODEL_DIR/feature_names.json" \
+            --max-advantage 0.10
+
+      # ── 4. Poison Detection pós-treino (double check) ─────────────────────
+      - name: Post-training poison detection
+        run: |
+          python scripts/poison_detection.py \
+            --data   "$DATA_CSV" \
+            --target "$TARGET_COLUMN" \
+            --output-dir results/
+
+      # ── 4b. Model Extraction Test (AML.T0044) ─────────────────────────────
+      # Verifica se um adversário pode reconstruir o modelo via queries black-box.
+      - name: Model extraction test (Knockoff, AML.T0044)
+        run: |
+          python scripts/model_extraction_test.py \
+            --data          "$DATA_CSV" \
+            --target        "$TARGET_COLUMN" \
+            --model         "$MODEL_DIR/rf_model.pkl" \
+            --meta          "$MODEL_DIR/feature_names.json" \
+            --n-queries     5000 \
+            --max-fidelity  0.90
+
+      # ── 5. promptfoo red-team (LLMs) ──────────────────────────────────────
+      - name: Install promptfoo
+        run: npm install -g promptfoo
+
+      - name: promptfoo red-team
+        if: hashFiles('promptfoo.yaml') != ''
+        run: |
+          promptfoo redteam run \
+            --config promptfoo.yaml \
+            --output results/redteam.json
+        continue-on-error: true
+
+      # ── 6. Garak — LLM vulnerability scanner (NVIDIA) ───────────────────
+      # OWASP LLM Top 10 · MITRE AML.T0056 · Prompt Injection · Jailbreak
+      # Aplicável quando o pipeline incluir endpoints LLM
+      - name: Garak LLM security scan
+        if: env.LLM_ENDPOINT != ''
+        run: |
+          pip install garak
+          python -m garak \
+            --model rest \
+            --probes dan,encoding,knownbadsignatures,malwaregen \
+            --report_prefix results/garak \
+            || true
+        env:
+          LLM_ENDPOINT: ${{ secrets.LLM_ENDPOINT || '' }}
+        continue-on-error: true
+
+      # ── 7. Compliance Gate (Policy enforcement) ──────────────────────────
+      # Lê policy.yml e verifica todos os gates bloqueantes passaram.
+      # OWASP MLSVS V10 — nenhum modelo promovido sem este gate.
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Compliance Gate
+        run: |
+          python scripts/compliance_check.py \
+            --policy policy.yml \
+            --results results/ \
+            --output results/compliance_report.json
+
+      # ── Upload todos os relatórios ────────────────────────────────────────
+      - name: Upload adversarial reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adversarial-reports
+          path: results/
+          retention-days: 30

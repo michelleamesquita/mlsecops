@@ -1,0 +1,145 @@
+# policy.yml — Machine-readable MLSecOps Security Policy
+# Lido por scripts/compliance_check.py para enforcement automatizado.
+# Ref: OWASP MLSVS 1.0 · MITRE ATLAS 2024 · NIST AI RMF 1.0
+
+version: "1.0"
+last_updated: "2025-01-01"
+
+frameworks:
+  - owasp_mlsvs: "1.0"
+  - mitre_atlas: "2024"
+  - nist_ai_rmf: "1.0"
+  - openssf_mlsecops: "2025"
+  - slsa: "L1"
+
+# ── Estágio 01 — Data Quality Gate ──────────────────────────────────────────
+data_quality:
+
+  integrity:
+    result_file: "results/integrity_report.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    atlas: "AML.T0010"
+    mlsvs: "V2"
+
+  schema_validation:
+    result_file: "results/ge_report.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    atlas: "AML.T0020"
+    mlsvs: "V3"
+
+  label_noise:
+    result_file: "results/label_noise_report.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    threshold_field: "noise_rate"
+    max_threshold: 0.05
+    atlas: "AML.T0020"
+    mlsvs: "V3"
+    note: "Calibre com baseline do domínio antes de tornar bloqueante"
+
+  poison_detection:
+    result_file: "results/poison_report.json"
+    field: "passed"
+    expected: true
+    blocking: false          # WARNING até calibração
+    atlas: "AML.T0020"
+    mlsvs: "V2"
+    note: "Testes KS/Chi2/IQR exigem calibração com baseline. JSD no target é sempre crítico."
+
+  drift:
+    result_file: "results/drift_report.json"
+    field: "passed"
+    expected: true
+    blocking: false          # Alerta, não bloqueante
+    mlsvs: "V9"
+
+# ── Estágio 02 — Supply-Chain Gate ───────────────────────────────────────────
+supply_chain:
+
+  model_scan:
+    result_file: "results/model_scan_report.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    atlas: "AML.T0010 AML.T0018"
+    mlsvs: "V7"
+
+  slsa_manifest:
+    result_file: "results/slsa_manifest.json"
+    field: "subject"
+    check: "not_empty"
+    blocking: true
+    mlsvs: "V8"
+
+  sbom:
+    result_file: "results/sbom.cdx.json"
+    field: "metadata"
+    check: "exists"
+    blocking: true
+    mlsvs: "V8"
+
+# ── Estágio 03 — Adversarial Gate ────────────────────────────────────────────
+adversarial:
+
+  fgsm:
+    result_file: "results/adversarial_fgsm.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    threshold_field: "acc_adversarial"
+    min_threshold: 0.75
+    atlas: "AML.T0043"
+    mlsvs: "V5"
+    note: "Calibre com baseline do domínio antes de tornar bloqueante"
+
+  pgd:
+    result_file: "results/adversarial_pgd.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    threshold_field: "acc_adversarial"
+    min_threshold: 0.70
+    atlas: "AML.T0043"
+    mlsvs: "V5"
+    note: "Calibre com baseline do domínio antes de tornar bloqueante"
+
+  membership_inference:
+    result_file: "results/membership_inference.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    threshold_field: "advantage"
+    max_threshold: 0.10
+    atlas: "AML.T0056"
+    mlsvs: "V6"
+    note: "Calibre com baseline do domínio antes de tornar bloqueante"
+
+  behavioral_baseline:
+    result_file: "results/behavioral_baseline_report.json"
+    field: "passed"
+    expected: true
+    blocking: true
+    atlas: "AML.T0018 AML.T0020"
+    mlsvs: "V5"
+    note: "Skippado na primeira execução (sem baseline). Bloqueante a partir do 2º treino."
+
+  model_extraction:
+    result_file: "results/model_extraction_report.json"
+    field: "passed"
+    expected: true
+    blocking: false          # WARNING — bloqueante apenas em ambientes com serving API
+    atlas: "AML.T0044"
+    mlsvs: "V5"
+    note: "Torne bloqueante quando o modelo for exposto via API de inferência"
+
+# ── Override ──────────────────────────────────────────────────────────────────
+override:
+  require_approvals: 2
+  valid_for_hours: 24
+  label: "security-override"
+  log_to_mlflow: true

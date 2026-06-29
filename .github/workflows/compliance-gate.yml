@@ -1,0 +1,124 @@
+# Workflow 4 — Compliance Gate (Policy Enforcement)
+# Verifica se TODOS os gates bloqueantes passaram antes de promover o modelo.
+# Equivalente ao Chef InSpec para MLSecOps.
+#
+# OWASP MLSVS V10 · NIST AI RMF — nenhum modelo vai para produção sem este gate.
+
+name: compliance-gate
+
+on:
+  workflow_call:
+  workflow_run:
+    workflows: ["adversarial-validation"]
+    types: [completed]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  compliance:
+    name: "Compliance Gate (OWASP MLSVS)"
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      # Baixa todos os relatórios dos workflows anteriores
+      - name: Download adversarial reports
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: adversarial-validation.yml
+          name: adversarial-reports
+          path: results/
+        continue-on-error: true
+
+      - name: Download secure-experiment reports
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: secure-experiment.yml
+          name: secure-experiment-reports
+          path: results/
+        continue-on-error: true
+
+      - name: Download data-validation reports
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: data-validation.yml
+          name: data-validation-reports
+          path: results/
+        continue-on-error: true
+
+      # ── Compliance Gate ───────────────────────────────────────────────────
+      - name: Run Compliance Gate
+        run: |
+          python scripts/compliance_check.py \
+            --policy policy.yml \
+            --results results/ \
+            --output results/compliance_report.json
+
+      - name: Upload compliance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-report
+          path: results/compliance_report.json
+          retention-days: 90
+
+      # ── Post compliance summary to PR ────────────────────────────────────
+      - name: Post compliance summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, pathlib
+
+          p = pathlib.Path("results/compliance_report.json")
+          if not p.exists():
+              print("No compliance report found.")
+              exit(0)
+
+          data = json.loads(p.read_text())
+          passed = data.get("passed", False)
+          controls = data.get("controls", [])
+
+          ok   = [c for c in controls if c["passed"] is True]
+          fail = [c for c in controls if c["passed"] is not True and c["blocking"]]
+          warn = [c for c in controls if c["passed"] is False and not c["blocking"]]
+
+          lines = [
+              "## MLSecOps Compliance Gate\n",
+              f"**Status**: {'✅ PASSED' if passed else '❌ FAILED'}\n",
+              f"| Blocking passed | Blocking failed | Warnings |",
+              f"|---|---|---|",
+              f"| {len(ok)} | {len(fail)} | {len(warn)} |\n",
+          ]
+          if fail:
+              lines.append("### Failed Controls")
+              for c in fail:
+                  lines.append(f"- `{c['stage']} / {c['name']}`: {c['message']}")
+          if warn:
+              lines.append("\n### Warnings (non-blocking)")
+              for c in warn:
+                  lines.append(f"- `{c['stage']} / {c['name']}`: {c['message']}")
+
+          pathlib.Path("results/compliance_summary.md").write_text("\n".join(lines))
+          print("\n".join(lines))
+          EOF
+
+      - name: Comment compliance on PR
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: results/compliance_summary.md

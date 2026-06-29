@@ -1,0 +1,160 @@
+# Workflow 2 — Experimentação Segura (Estágio 02)
+# SCA · treino reproduzível · Model Scan · SBOM · SLSA Provenance
+#
+# GENÉRICO: substitua o step "Train model" pelo seu script de treino.
+# Ref: Sotiropoulos ch18 · DevSecOps aplicado ao repo ML
+
+name: secure-experiment
+
+on:
+  workflow_call:
+  pull_request:
+    branches: [main, staging]
+    paths:
+      - "train_rf.py"
+      - "requirements.txt"
+      - "scripts/**"
+
+# ── Configuração do projeto ───────────────────────────────────────────────────
+env:
+  PYTHON_VERSION: "3.11"
+  DATA_CSV: "all_findings_flat.csv"
+  TARGET_COLUMN: "is_risky"
+  MODEL_OUTPUT_DIR: "model"
+
+jobs:
+  sca-and-train:
+    name: "SCA + Treino + Model Scan"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write   # Sigstore OIDC
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      # ── SCA — vulnerabilidades em dependências ML ─────────────────────────
+      # DevSecOps clássico aplicado ao repo ML (≠ MLSecOps, conforme Agent.md)
+      - name: pip-audit (SCA)
+        run: |
+          pip install pip-audit
+          mkdir -p results
+          pip-audit -r requirements.txt --format markdown --output results/pip-audit.md || true
+          cat results/pip-audit.md
+
+      - name: Install ML dependencies
+        run: pip install -r requirements.txt
+
+      # ── NB Defense — segurança em notebooks Jupyter ───────────────────────
+      # Detecta: secrets, PII, CVEs em dependências, células perigosas
+      # OWASP MLSVS V7 · Stage 2 do pipeline AISP
+      - name: Install nbdefense
+        run: pip install nbdefense
+
+      - name: NB Defense scan (notebooks)
+        if: hashFiles('**/*.ipynb') != ''
+        run: |
+          mkdir -p results
+          nbdefense scan . --output-file results/nbdefense_report.json || true
+          echo "::notice::NB Defense report: results/nbdefense_report.json"
+        continue-on-error: true
+
+      # ── Treino reproduzível (seed fixo, MLflow tracking) ──────────────────
+      - name: Train model (seed fixo)
+        env:
+          PYTHONHASHSEED: "42"
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_URI || 'sqlite:///mlflow.db' }}
+          DATA_PATH: ${{ env.DATA_CSV }}
+          MODEL_OUTPUT_DIR: ${{ env.MODEL_OUTPUT_DIR }}
+        run: |
+          python train_rf.py \
+            --seed 42 \
+            --experiment-name "ci-${{ github.sha }}" \
+            --sample 200000 \
+            --kfold 5
+
+      # ── SHA256 do modelo treinado ─────────────────────────────────────────
+      - name: Compute model integrity hash
+        run: |
+          python scripts/integrity_check.py \
+            --files "$MODEL_OUTPUT_DIR" \
+            --update \
+            --checksums "$MODEL_OUTPUT_DIR/checksums.sha256" \
+            --output-dir results/
+
+      # ── Model Scan (ProtectAI) ────────────────────────────────────────────
+      # MITRE ATLAS AML.T0010 · AML.T0018 Backdoor
+      - name: Install modelscan
+        run: pip install modelscan
+
+      - name: Model Scan (backdoor + malicious code detection)
+        run: |
+          python scripts/model_scan.py \
+            --model "$MODEL_OUTPUT_DIR/rf_model.pkl" \
+            --output-dir results/
+
+      # ── Sigstore keyless — SLSA provenance ───────────────────────────────
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign model artifact (SLSA)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          tar czf model.tar.gz "$MODEL_OUTPUT_DIR"/
+          cosign sign-blob --yes model.tar.gz --bundle model.tar.gz.bundle
+          echo "::notice::Modelo assinado via Sigstore keyless OIDC"
+
+      # ── Lineage Manifest (provenance chain) ─────────────────────────────
+      # MITRE ATLAS AML.T0010 · SLSA Provenance Level 2
+      - name: Build Lineage Manifest
+        run: |
+          python scripts/lineage.py build \
+            --data  "$DATA_CSV" \
+            --model "$MODEL_OUTPUT_DIR/rf_model.pkl" \
+            --config policy.yml requirements.txt \
+            --scripts train_rf.py \
+            --mlflow-run "${{ env.MLFLOW_RUN_ID }}" \
+            --results-dir results/ \
+            --output results/lineage_manifest.json
+          echo "::notice::Lineage manifest: results/lineage_manifest.json"
+
+      # ── CycloneDX ML SBOM ─────────────────────────────────────────────────
+      - name: Generate ML SBOM (CycloneDX)
+        run: |
+          pip install cyclonedx-bom
+          cyclonedx-py environment \
+            --output-format json \
+            --outfile results/sbom.cdx.json
+          echo "::notice::SBOM gerado em results/sbom.cdx.json"
+
+      # ── Upload artefatos ──────────────────────────────────────────────────
+      - name: Upload signed model
+        uses: actions/upload-artifact@v4
+        with:
+          name: rf-model-signed
+          path: |
+            model.tar.gz
+            model.tar.gz.bundle
+            ${{ env.MODEL_OUTPUT_DIR }}/checksums.sha256
+          retention-days: 90
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-experiment-reports
+          path: results/
+          retention-days: 30
+
+      - name: Post metrics to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          path: results/train_metrics.md
