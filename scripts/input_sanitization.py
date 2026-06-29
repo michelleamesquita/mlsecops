@@ -211,6 +211,7 @@ def main() -> None:
             json.dump({
                 "defense_applied": False,
                 "reason": "gate_passed",
+                "passed": True,
                 "attack": attack_name,
                 "acc_adversarial_original": acc_adv_orig,
                 "threshold": threshold,
@@ -300,6 +301,7 @@ def main() -> None:
             "best_acc_defended": best["acc_defended"],
             "best_recovery": best["recovery"],
             "gate_passed_after_defense": best["passed"],
+            "passed": best["passed"],
         }, f, indent=2)
 
     log.info(f"  Relatório salvo: {out}")

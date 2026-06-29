@@ -66,6 +66,10 @@ def evaluate_control(name: str, stage: str, spec: dict,
     """Avalia um controle individual contra seu arquivo de resultado."""
     result_path = results_dir / pathlib.Path(spec["result_file"]).name
     blocking = spec.get("blocking", True)
+    # blocking_when_missing: permite que um controle bloqueante seja SKIP quando
+    # o arquivo não existe — útil para controles de estágios upstream (data-validation,
+    # secure-experiment) que não estão disponíveis no runner do adversarial-validation.
+    blocking_when_missing = spec.get("blocking_when_missing", blocking)
     atlas = spec.get("atlas", "")
     mlsvs = spec.get("mlsvs", "")
     note = spec.get("note", "")
@@ -74,11 +78,13 @@ def evaluate_control(name: str, stage: str, spec: dict,
 
     if data is None:
         msg = f"Result file not found: {result_path}"
-        if blocking:
+        if blocking_when_missing:
             return ControlResult(name, stage, blocking, None, msg, atlas, mlsvs)
         else:
-            return ControlResult(name, stage, blocking, None,
-                                 f"{msg} (non-blocking — skipped)", atlas, mlsvs)
+            skip_note = note or "verified by upstream pipeline stage"
+            # Override blocking=False so the existing SKIP path handles it gracefully
+            return ControlResult(name, stage, False, None,
+                                 f"{msg} — SKIP ({skip_note})", atlas, mlsvs)
 
     check = spec.get("check")
 
