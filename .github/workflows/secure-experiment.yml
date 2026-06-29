@@ -187,28 +187,12 @@ jobs:
           # Complementa o nosso SBOM com provenance do modelo pré-treinado.
           if [ -n "$HF_MODEL_ID" ]; then
             echo "::notice::Fetching OWASP AIBOM for HuggingFace model: $HF_MODEL_ID"
-            pip install requests --quiet
-            python - <<'PYEOF'
-import os, json, sys
-import urllib.request, urllib.error
-
-model_id = os.environ["HF_MODEL_ID"]
-# OWASP AIBOM Generator API endpoint (CycloneDX JSON download)
-url = f"https://aibom.owasp.org/api/generate?model={model_id}&format=cyclonedx"
-try:
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
-    with open("results/sbom_hf_model.cdx.json", "w") as f:
-        json.dump(data, f, indent=2)
-    print(f"OWASP AIBOM saved: results/sbom_hf_model.cdx.json")
-except urllib.error.URLError as e:
-    print(f"Warning: OWASP AIBOM Generator unreachable ({e}). Skipping HF model AIBOM.")
-    sys.exit(0)
-PYEOF
+            python scripts/fetch_owasp_aibom.py \
+              --model-id "$HF_MODEL_ID" \
+              --output results/sbom_hf_model.cdx.json
           else
-            echo "::notice::HF_MODEL_ID not set — skipping OWASP AIBOM Generator (HuggingFace models only)."
-            echo "  To enable: set vars.HF_MODEL_ID in your repo/org variables."
+            echo "::notice::HF_MODEL_ID not set — skipping OWASP AIBOM Generator."
+            echo "To enable: add vars.HF_MODEL_ID (e.g. microsoft/codebert-base) in repo settings."
           fi
 
       # ── Upload artefatos ──────────────────────────────────────────────────
