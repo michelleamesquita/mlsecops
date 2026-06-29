@@ -48,6 +48,21 @@ jobs:
           pip install pandas pyarrow scipy scikit-learn \
                       great-expectations cleanlab evidently
 
+      # ── 0. Dados: usa real se existir, gera sintético para CI caso contrário ──
+      # O dataset real (*.csv) é ignorado pelo git (.gitignore).
+      # Em produção: substituir este step por `dvc pull` ou download de S3/GCS.
+      - name: Provision dataset (synthetic fallback for CI)
+        run: |
+          if [ -f "$DATA_CSV" ]; then
+            echo "::notice::Dataset real encontrado: $DATA_CSV"
+          else
+            echo "::warning::$DATA_CSV não encontrado — gerando dataset sintético para CI (5 000 linhas)."
+            python scripts/generate_ci_data.py \
+              --output "$DATA_CSV" \
+              --rows 5000 \
+              --seed 42
+          fi
+
       # ── 1. Integridade SHA256 — dados + configs ───────────────────────────
       # MITRE ATLAS AML.T0010 · AML.T0020 · AML.T0024g (row-level: split-view poisoning)
       - name: SHA256 Integrity Check (data)

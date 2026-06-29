@@ -40,6 +40,17 @@ jobs:
           pip install -r requirements.txt
           pip install adversarial-robustness-toolbox modelscan
 
+      # ── 0. Dados: usa real se existir, gera sintético para CI ─────────────
+      - name: Provision dataset (synthetic fallback for CI)
+        run: |
+          if [ -f "$DATA_CSV" ]; then
+            echo "::notice::Dataset real encontrado: $DATA_CSV"
+          else
+            echo "::warning::$DATA_CSV não encontrado — gerando dataset sintético para CI (5 000 linhas)."
+            python scripts/generate_ci_data.py \
+              --output "$DATA_CSV" --rows 5000 --seed 42
+          fi
+
       # ── Treino rápido para CI (amostra) ───────────────────────────────────
       - name: Train model (CI sample)
         env:

@@ -41,6 +41,18 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
+      # ── 0. Dados: usa real se existir, gera sintético para CI ─────────────
+      - name: Provision dataset (synthetic fallback for CI)
+        run: |
+          if [ -f "$DATA_CSV" ]; then
+            echo "::notice::Dataset real encontrado: $DATA_CSV"
+          else
+            echo "::warning::$DATA_CSV não encontrado — gerando dataset sintético para CI (5 000 linhas)."
+            pip install pandas numpy
+            python scripts/generate_ci_data.py \
+              --output "$DATA_CSV" --rows 5000 --seed 42
+          fi
+
       # ── SCA — vulnerabilidades em dependências ML ─────────────────────────
       # DevSecOps clássico aplicado ao repo ML (≠ MLSecOps, conforme Agent.md)
       - name: pip-audit (SCA)
