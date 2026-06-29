@@ -107,25 +107,25 @@ def main() -> None:
         log.error("Run: pip install adversarial-robustness-toolbox")
         sys.exit(1)
 
-    # Importa ataques com fallback — ZooAttack/HopSkipJump podem falhar se dependências
-    # opcionais (torch, scipy extras) estiverem ausentes.
+    # Importa ataques com fallback — disponibilidade varia por versão do ART.
+    # ART 1.18+ removeu HopSkipJumpAttack; SquareAttack é o substituto recomendado.
     ZooAttack = None
-    HopSkipJumpAttack = None
+    SquareAttack = None
     BoundaryAttack = None
     try:
         from art.attacks.evasion import ZooAttack
     except (ImportError, Exception) as exc:
         log.warning(f"  ZooAttack não disponível: {exc}")
     try:
-        from art.attacks.evasion import HopSkipJumpAttack
+        from art.attacks.evasion import SquareAttack
     except (ImportError, Exception) as exc:
-        log.warning(f"  HopSkipJumpAttack não disponível: {exc}")
+        log.warning(f"  SquareAttack não disponível: {exc}")
     try:
         from art.attacks.evasion import BoundaryAttack
     except (ImportError, Exception) as exc:
         log.warning(f"  BoundaryAttack não disponível: {exc}")
 
-    if ZooAttack is None and HopSkipJumpAttack is None and BoundaryAttack is None:
+    if ZooAttack is None and SquareAttack is None and BoundaryAttack is None:
         log.error("Nenhum ataque ART disponível. Verifique a instalação.")
         sys.exit(1)
 
@@ -161,26 +161,31 @@ def main() -> None:
     log.info(f"\n=== Attack: {args.attack.upper()} (ε={args.epsilon}) on {n} samples ===")
     if args.attack == "fgsm":
         if ZooAttack is not None:
+            # batch_size=1 obrigatório para feature vectors tabulares (não imagens)
             attack = ZooAttack(art_clf, confidence=0.0, targeted=False,
                                learning_rate=args.epsilon, max_iter=50,
-                               batch_size=32, nb_parallel=5, use_resize=False)
-            log.info("  ZooAttack (FGSM proxy for black-box): running…")
+                               batch_size=1, nb_parallel=1, use_resize=False)
+            log.info("  ZooAttack (FGSM proxy — score-based black-box): running…")
+        elif SquareAttack is not None:
+            attack = SquareAttack(art_clf, eps=args.epsilon, max_iter=100, verbose=False)
+            log.info("  SquareAttack (fallback para FGSM): running…")
         elif BoundaryAttack is not None:
             attack = BoundaryAttack(art_clf, targeted=False, max_iter=100)
-            log.info("  BoundaryAttack (fallback for FGSM): running…")
+            log.info("  BoundaryAttack (fallback 2 para FGSM): running…")
         else:
-            log.warning("  Nenhum ataque FGSM disponível — pulando adversarial eval.")
+            log.warning("  Nenhum ataque FGSM disponível — pulando.")
             attack = None
-    else:
-        if HopSkipJumpAttack is not None:
-            attack = HopSkipJumpAttack(art_clf, targeted=False, norm=np.inf,
-                                        max_iter=args.steps, max_eval=500, init_eval=50)
-            log.info("  HopSkipJumpAttack (PGD proxy for black-box): running…")
+    else:  # pgd
+        # HopSkipJumpAttack removido no ART 1.18+; SquareAttack é o substituto recomendado
+        if SquareAttack is not None:
+            attack = SquareAttack(art_clf, eps=args.epsilon, max_iter=args.steps,
+                                  verbose=False)
+            log.info("  SquareAttack (PGD proxy — decision-based black-box): running…")
         elif BoundaryAttack is not None:
-            attack = BoundaryAttack(art_clf, targeted=False, max_iter=200)
-            log.info("  BoundaryAttack (fallback for PGD): running…")
+            attack = BoundaryAttack(art_clf, targeted=False, max_iter=args.steps)
+            log.info("  BoundaryAttack (fallback para PGD): running…")
         else:
-            log.warning("  Nenhum ataque PGD disponível — pulando adversarial eval.")
+            log.warning("  Nenhum ataque PGD disponível — pulando.")
             attack = None
 
     if attack is None:
@@ -189,7 +194,6 @@ def main() -> None:
     else:
         X_adv = attack.generate(X_sub)
         acc_adv = (clf.predict(X_adv) == y_sub).mean()
-    acc_adv = (clf.predict(X_adv) == y_sub).mean()
 
     log.info(f"\n=== Adversarial Gate ===")
     log.info(f"  Accuracy (clean)       : {acc_clean:.4f}")
