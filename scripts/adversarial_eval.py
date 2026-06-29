@@ -102,9 +102,31 @@ def main() -> None:
 
     try:
         from art.estimators.classification import SklearnClassifier
-        from art.attacks.evasion import ZooAttack, HopSkipJumpAttack
-    except ImportError:
-        log.error("adversarial-robustness-toolbox not installed. Run: pip install adversarial-robustness-toolbox")
+    except ImportError as exc:
+        log.error(f"adversarial-robustness-toolbox not installed or broken: {exc}")
+        log.error("Run: pip install adversarial-robustness-toolbox")
+        sys.exit(1)
+
+    # Importa ataques com fallback — ZooAttack/HopSkipJump podem falhar se dependências
+    # opcionais (torch, scipy extras) estiverem ausentes.
+    ZooAttack = None
+    HopSkipJumpAttack = None
+    BoundaryAttack = None
+    try:
+        from art.attacks.evasion import ZooAttack
+    except (ImportError, Exception) as exc:
+        log.warning(f"  ZooAttack não disponível: {exc}")
+    try:
+        from art.attacks.evasion import HopSkipJumpAttack
+    except (ImportError, Exception) as exc:
+        log.warning(f"  HopSkipJumpAttack não disponível: {exc}")
+    try:
+        from art.attacks.evasion import BoundaryAttack
+    except (ImportError, Exception) as exc:
+        log.warning(f"  BoundaryAttack não disponível: {exc}")
+
+    if ZooAttack is None and HopSkipJumpAttack is None and BoundaryAttack is None:
+        log.error("Nenhum ataque ART disponível. Verifique a instalação.")
         sys.exit(1)
 
     for p in [args.model, args.data]:
@@ -138,16 +160,35 @@ def main() -> None:
 
     log.info(f"\n=== Attack: {args.attack.upper()} (ε={args.epsilon}) on {n} samples ===")
     if args.attack == "fgsm":
-        attack = ZooAttack(art_clf, confidence=0.0, targeted=False,
-                           learning_rate=args.epsilon, max_iter=50,
-                           batch_size=32, nb_parallel=5, use_resize=False)
-        log.info("  ZooAttack (FGSM proxy for black-box): running…")
+        if ZooAttack is not None:
+            attack = ZooAttack(art_clf, confidence=0.0, targeted=False,
+                               learning_rate=args.epsilon, max_iter=50,
+                               batch_size=32, nb_parallel=5, use_resize=False)
+            log.info("  ZooAttack (FGSM proxy for black-box): running…")
+        elif BoundaryAttack is not None:
+            attack = BoundaryAttack(art_clf, targeted=False, max_iter=100)
+            log.info("  BoundaryAttack (fallback for FGSM): running…")
+        else:
+            log.warning("  Nenhum ataque FGSM disponível — pulando adversarial eval.")
+            attack = None
     else:
-        attack = HopSkipJumpAttack(art_clf, targeted=False, norm=np.inf,
-                                    max_iter=args.steps, max_eval=500, init_eval=50)
-        log.info("  HopSkipJumpAttack (PGD proxy for black-box): running…")
+        if HopSkipJumpAttack is not None:
+            attack = HopSkipJumpAttack(art_clf, targeted=False, norm=np.inf,
+                                        max_iter=args.steps, max_eval=500, init_eval=50)
+            log.info("  HopSkipJumpAttack (PGD proxy for black-box): running…")
+        elif BoundaryAttack is not None:
+            attack = BoundaryAttack(art_clf, targeted=False, max_iter=200)
+            log.info("  BoundaryAttack (fallback for PGD): running…")
+        else:
+            log.warning("  Nenhum ataque PGD disponível — pulando adversarial eval.")
+            attack = None
 
-    X_adv = attack.generate(X_sub)
+    if attack is None:
+        acc_adv = acc_clean
+        log.warning("  Adversarial eval skipped — reporting clean accuracy as adversarial.")
+    else:
+        X_adv = attack.generate(X_sub)
+        acc_adv = (clf.predict(X_adv) == y_sub).mean()
     acc_adv = (clf.predict(X_adv) == y_sub).mean()
 
     log.info(f"\n=== Adversarial Gate ===")

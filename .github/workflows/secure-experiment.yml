@@ -164,16 +164,52 @@ jobs:
       # ── CycloneDX ML BOM (Software Bill of Materials + Model Card) ──────────
       # Gera SBOM completo: dependências Python + ML model card (CycloneDX 1.6)
       # Inclui: algoritmo, features, métricas, dataset provenance, ética
-      # ISO/IEC 42001 · OWASP CycloneDX ML BOM
+      # ISO/IEC 42001 · OWASP CycloneDX ML BOM · OWASP AIBOM Generator
       - name: Generate ML BOM (CycloneDX 1.6 + model card)
+        env:
+          # Opcional: se o projeto usa um modelo base do HuggingFace, defina HF_MODEL_ID
+          # e o OWASP AIBOM Generator será chamado para gerar o AIBOM do modelo base.
+          # Ex: HF_MODEL_ID: "microsoft/codebert-base"
+          HF_MODEL_ID: ${{ vars.HF_MODEL_ID || '' }}
         run: |
           mkdir -p results
+
+          # 1. Modelo sklearn local → nosso generate_mlbom.py (sempre executa)
           python scripts/generate_mlbom.py \
             --model   "$MODEL_OUTPUT_DIR/rf_model.pkl" \
             --meta    "$MODEL_OUTPUT_DIR/feature_names.json" \
             --metrics "results/train_metrics_latest.json" \
             --output  results/sbom_ml.cdx.json
-          echo "::notice::ML BOM gerado em results/sbom_ml.cdx.json (spec 1.6 + model card)"
+          echo "::notice::ML BOM (local model) → results/sbom_ml.cdx.json"
+
+          # 2. OWASP AIBOM Generator (https://genai.owasp.org/resource/owasp-aibom-generator/)
+          # Executa apenas se HF_MODEL_ID estiver definido (modelos base do HuggingFace).
+          # Complementa o nosso SBOM com provenance do modelo pré-treinado.
+          if [ -n "$HF_MODEL_ID" ]; then
+            echo "::notice::Fetching OWASP AIBOM for HuggingFace model: $HF_MODEL_ID"
+            pip install requests --quiet
+            python - <<'PYEOF'
+import os, json, sys
+import urllib.request, urllib.error
+
+model_id = os.environ["HF_MODEL_ID"]
+# OWASP AIBOM Generator API endpoint (CycloneDX JSON download)
+url = f"https://aibom.owasp.org/api/generate?model={model_id}&format=cyclonedx"
+try:
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read())
+    with open("results/sbom_hf_model.cdx.json", "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"OWASP AIBOM saved: results/sbom_hf_model.cdx.json")
+except urllib.error.URLError as e:
+    print(f"Warning: OWASP AIBOM Generator unreachable ({e}). Skipping HF model AIBOM.")
+    sys.exit(0)
+PYEOF
+          else
+            echo "::notice::HF_MODEL_ID not set — skipping OWASP AIBOM Generator (HuggingFace models only)."
+            echo "  To enable: set vars.HF_MODEL_ID in your repo/org variables."
+          fi
 
       # ── Upload artefatos ──────────────────────────────────────────────────
       - name: Upload signed model
