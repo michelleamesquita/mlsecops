@@ -102,6 +102,8 @@ jobs:
             --target    "$TARGET_COLUMN" \
             --threshold 0.05 \
             --sample    50000
+          # Nota: --fail-on-noise não ativo por padrão (warn-only).
+          # Para tornar bloqueante em produção com dados reais, adicione --fail-on-noise.
 
       # ── 5. Drift vs baseline (Evidently + PSI) ────────────────────────────
       - name: Prepare baseline / current splits

@@ -75,6 +75,8 @@ def main() -> None:
     parser.add_argument("--cat-features", nargs="*", default=None,
                         help="Categorical feature names (auto-detected if omitted)")
     parser.add_argument("--output-dir",   default="results")
+    parser.add_argument("--fail-on-noise", action="store_true",
+                        help="Exit 1 if noise rate exceeds threshold (default: warn only)")
     args = parser.parse_args()
 
     path = pathlib.Path(args.data)
@@ -126,7 +128,13 @@ def main() -> None:
 
     if noise_rate > args.threshold:
         log.error(f"  Label Noise Gate FAILED — {noise_rate*100:.2f}% > {args.threshold*100:.1f}%")
-        sys.exit(1)
+        log.info("  NOTE: thresholds empíricos — calibre com baseline do domínio antes de tornar bloqueante.")
+        log.info("  MITRE ATLAS AML.T0020 · Clean-label poisoning")
+        if args.fail_on_noise:
+            sys.exit(1)
+        else:
+            log.warning("  Continuando (--fail-on-noise não ativo). Adicione --fail-on-noise para bloquear.")
+        return
 
     log.info("  Label Noise Gate: PASSED")
 

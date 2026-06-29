@@ -64,18 +64,39 @@ def load_schema(schema_path: str | None) -> dict:
 
 def generate(schema: dict, n_rows: int, seed: int) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
+    target_col = schema.get("target", "label")
+    cols = schema["columns"]
+
+    # ── Gera o target primeiro para criar correlação com as features ──────────
+    target_spec = cols.get(target_col, {"type": "binary", "pos_rate": 0.30})
+    pos_rate = target_spec.get("pos_rate", 0.5)
+    y = rng.choice([0, 1], size=n_rows, p=[1 - pos_rate, pos_rate])
+
     data: dict[str, np.ndarray] = {}
-    for col, spec in schema["columns"].items():
+    for col, spec in cols.items():
         dtype = spec.get("type", "float")
+        if col == target_col:
+            data[col] = y
+            continue
+
         if dtype == "binary":
             rate = spec.get("pos_rate", 0.5)
             data[col] = rng.choice([0, 1], size=n_rows, p=[1 - rate, rate])
+
         elif dtype == "int":
             lo, hi = spec.get("min", 0), spec.get("max", 100)
-            data[col] = rng.integers(lo, hi + 1, size=n_rows)
+            base = rng.integers(lo, hi + 1, size=n_rows)
+            # Adiciona sinal: features com índice par são levemente correlacionadas com y
+            signal_strength = (hi - lo) * 0.3
+            signal = (y * signal_strength).astype(int)
+            data[col] = np.clip(base + signal, lo, hi)
+
         elif dtype == "float":
             lo, hi = spec.get("min", 0.0), spec.get("max", 1.0)
-            data[col] = rng.uniform(lo, hi, size=n_rows)
+            base = rng.uniform(lo, hi, size=n_rows)
+            signal_strength = (hi - lo) * 0.3
+            data[col] = np.clip(base + y * signal_strength, lo, hi)
+
         elif dtype == "categorical":
             cats = spec.get("categories", ["A", "B", "C"])
             weights = spec.get("weights", None)
@@ -85,6 +106,7 @@ def generate(schema: dict, n_rows: int, seed: int) -> pd.DataFrame:
             data[col] = rng.choice(cats, size=n_rows, p=weights)
         else:
             data[col] = np.zeros(n_rows)
+
     return pd.DataFrame(data)
 
 
