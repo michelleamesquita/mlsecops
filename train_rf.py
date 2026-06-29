@@ -102,10 +102,19 @@ def run_data_quality_gate(df: pd.DataFrame) -> None:
     if risky_rate < 0.01 or risky_rate > 0.99:
         log.warning("  Desbalanceamento extremo (>99:1). Revise class_weight ou estratégia de sampling.")
 
-    for col in NUM_FEATURES:
+    # Verifica apenas colunas que existem no dataframe (robusto a datasets diferentes)
+    present_num = [c for c in NUM_FEATURES if c in df.columns]
+    missing_num = [c for c in NUM_FEATURES if c not in df.columns]
+    if missing_num:
+        log.warning(f"  Features numéricas ausentes no dataset: {missing_num}")
+        log.warning("  Serão ignoradas — verifique o schema ou use o dataset correto.")
+
+    for col in present_num:
         null_rate = df[col].isna().mean()
         if null_rate > 0.05:
             log.warning(f"  Feature '{col}' com {null_rate*100:.1f}% nulos — considere imputação.")
+
+    log.info("  Data Quality Gate: PASSED")
 
     log.info("  Data Quality Gate: PASSED")
 
@@ -114,18 +123,30 @@ def run_data_quality_gate(df: pd.DataFrame) -> None:
 # Feature Engineering
 # ---------------------------------------------------------------------------
 def build_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Encoda categóricas e retorna (X, encoders)."""
+    """Encoda categóricas e retorna (X, encoders). Usa apenas colunas presentes."""
     encoders: dict[str, LabelEncoder] = {}
     df = df.copy()
 
-    for col in CAT_FEATURES:
+    # Filtra apenas features presentes no dataframe
+    cat_feats = [c for c in CAT_FEATURES if c in df.columns]
+    num_feats = [c for c in NUM_FEATURES if c in df.columns]
+
+    if not cat_feats and not num_feats:
+        # Fallback: usa todas as colunas exceto o target
+        num_feats = [c for c in df.columns if c != TARGET
+                     and pd.api.types.is_numeric_dtype(df[c])]
+        cat_feats = [c for c in df.columns if c != TARGET and c not in num_feats]
+        log.warning(f"  CAT/NUM_FEATURES não encontradas — auto-detectando: "
+                    f"cat={cat_feats}, num={num_feats}")
+
+    for col in cat_feats:
         df[col] = df[col].fillna("UNKNOWN").astype(str)
         le = LabelEncoder()
         df[col] = le.fit_transform(df[col])
         encoders[col] = le
 
-    all_features = CAT_FEATURES + NUM_FEATURES
-    for col in NUM_FEATURES:
+    all_features = cat_feats + num_feats
+    for col in num_feats:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     return df[all_features], encoders

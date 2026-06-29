@@ -32,21 +32,36 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Schema padrão: all_findings_flat.csv (SAST Bandit) ─────────────────────
-# Reflecte a estrutura real do dataset para que os scripts de validação
-# encontrem as colunas esperadas.
+# Deve espelhar exatamente CAT_FEATURES + NUM_FEATURES + TARGET de train_rf.py
+# para que o pipeline CI funcione sem o dataset real.
 DEFAULT_SCHEMA = {
     "target": "is_risky",
     "columns": {
-        "severity":           {"type": "int",   "min": 0, "max": 2},
-        "confidence":         {"type": "int",   "min": 0, "max": 2},
-        "line_number":        {"type": "int",   "min": 1, "max": 5000},
-        "col_offset":         {"type": "int",   "min": 0, "max": 200},
-        "end_col_offset":     {"type": "int",   "min": 0, "max": 200},
-        "issue_cwe_id":       {"type": "int",   "min": 0, "max": 999},
-        "test_id_encoded":    {"type": "int",   "min": 0, "max": 50},
-        "filename_length":    {"type": "int",   "min": 5, "max": 200},
-        "issue_text_length":  {"type": "int",   "min": 10, "max": 500},
-        "is_risky":           {"type": "binary", "pos_rate": 0.30},
+        # ── Categóricas (CAT_FEATURES em train_rf.py) ─────────────────────
+        "model":       {"type": "categorical", "categories": ["gpt-4o", "gpt-4", "claude-3", "gemini-pro"]},
+        "severity":    {"type": "categorical", "categories": ["LOW", "MEDIUM", "HIGH"]},
+        "confidence":  {"type": "categorical", "categories": ["LOW", "MEDIUM", "HIGH"]},
+        "test_id":     {"type": "categorical", "categories": ["B101","B102","B105","B106","B201","B301","B601"]},
+        "cwe":         {"type": "categorical", "categories": ["CWE-78","CWE-89","CWE-22","CWE-79","CWE-94"]},
+        # ── Numéricas (NUM_FEATURES em train_rf.py) ────────────────────────
+        "line_number":                    {"type": "int",   "min": 1,    "max": 5000},
+        "patch_lines":                    {"type": "int",   "min": 0,    "max": 500},
+        "patch_added":                    {"type": "int",   "min": 0,    "max": 300},
+        "patch_removed":                  {"type": "int",   "min": 0,    "max": 300},
+        "patch_files_touched":            {"type": "int",   "min": 1,    "max": 20},
+        "patch_hunks":                    {"type": "int",   "min": 1,    "max": 15},
+        "patch_churn":                    {"type": "int",   "min": 0,    "max": 600},
+        "patch_net":                      {"type": "int",   "min": -200, "max": 200},
+        "prompt_chars":                   {"type": "int",   "min": 50,   "max": 8000},
+        "prompt_lines":                   {"type": "int",   "min": 1,    "max": 200},
+        "prompt_tokens":                  {"type": "int",   "min": 10,   "max": 2000},
+        "prompt_has_security_guidelines": {"type": "int",   "min": 0,    "max": 1},
+        "temperature":                    {"type": "float", "min": 0.0,  "max": 1.0},
+        "cwe_prevalence_overall":         {"type": "float", "min": 0.0,  "max": 1.0},
+        "cwe_severity_score":             {"type": "float", "min": 0.0,  "max": 10.0},
+        "cwe_weighted_severity":          {"type": "float", "min": 0.0,  "max": 10.0},
+        # ── Target ─────────────────────────────────────────────────────────
+        "is_risky":    {"type": "binary", "pos_rate": 0.30},
     },
 }
 
