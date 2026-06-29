@@ -198,16 +198,25 @@ jobs:
             --max-fidelity  0.90
 
       # ── 5. promptfoo red-team (LLMs) ──────────────────────────────────────
+      # Só executa se houver um endpoint LLM configurado via secret.
+      # Para ML clássico (Random Forest), este step é pulado automaticamente.
       - name: Install promptfoo
+        if: env.LLM_ENDPOINT != '' || env.OPENAI_API_KEY != ''
         run: npm install -g promptfoo
+        env:
+          LLM_ENDPOINT:   ${{ secrets.LLM_ENDPOINT || '' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
 
       - name: promptfoo red-team
-        if: hashFiles('promptfoo.yaml') != ''
+        if: (env.LLM_ENDPOINT != '' || env.OPENAI_API_KEY != '') && hashFiles('promptfoo.yaml') != ''
         run: |
           promptfoo redteam run \
             --config promptfoo.yaml \
             --output results/redteam.json
         continue-on-error: true
+        env:
+          LLM_ENDPOINT:   ${{ secrets.LLM_ENDPOINT || '' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
 
       # ── 6. Garak — LLM vulnerability scanner (NVIDIA) ───────────────────
       # OWASP LLM Top 10 · MITRE AML.T0056 · Prompt Injection · Jailbreak
