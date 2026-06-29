@@ -59,8 +59,15 @@ jobs:
         run: |
           pip install pip-audit
           mkdir -p results
-          pip-audit -r requirements.txt --format markdown --output results/pip-audit.md || true
-          cat results/pip-audit.md
+          # pip-audit só grava o arquivo se encontrar vulnerabilidades; capturamos ambos os casos
+          if pip-audit -r requirements.txt -f markdown -o results/pip-audit.md 2>&1; then
+            echo "::notice::pip-audit: No known vulnerabilities found."
+            # Garante que o arquivo existe para o upload (mesmo vazio)
+            [ -f results/pip-audit.md ] || echo "No known vulnerabilities found." > results/pip-audit.md
+          else
+            echo "::warning::pip-audit encontrou vulnerabilidades. Veja results/pip-audit.md"
+            cat results/pip-audit.md
+          fi
 
       - name: Install ML dependencies
         run: pip install -r requirements.txt
